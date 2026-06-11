@@ -312,6 +312,28 @@ impl Database {
         Ok(updated > 0)
     }
 
+    /// 一键重置某供应商全部 Key 的健康状态（清冷却/失败计数），返回受影响行数。
+    pub fn reset_all_provider_keys_health(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<u64, AppError> {
+        let conn = lock_conn!(self.conn);
+        let updated = conn
+            .execute(
+                "UPDATE provider_keys
+                 SET status = CASE WHEN enabled = 1 THEN 'active' ELSE 'disabled' END,
+                     consecutive_failures = 0,
+                     last_failure_at = NULL,
+                     cooldown_until = NULL,
+                     updated_at = ?3
+                 WHERE app_type = ?1 AND provider_id = ?2",
+                params![app_type, provider_id, now_ts()],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(updated as u64)
+    }
+
     pub fn record_provider_key_success(
         &self,
         app_type: &str,

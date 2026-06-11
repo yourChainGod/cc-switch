@@ -191,6 +191,8 @@
     "copied": "已複製 Key",
     "copyFailed": "複製 Key 失敗",
     "clearCooldown": "清除冷卻",
+    "resetAll": "重置所有冷卻",
+    "resetAllDone": "已重置 {{count}} 個 Key 的健康狀態",
     "setConfigKey": "使用該 Key",
     "poolSeeded": "已建立 Key 池（{{count}} 個 Key）",
     "poolSeedFailed": "供應商已建立，但部分 Key 寫入 Key 池失敗"

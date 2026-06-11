@@ -194,6 +194,19 @@ pub fn reset_provider_key_health(
 }
 
 #[tauri::command]
+pub fn reset_all_provider_key_health(
+    state: State<'_, AppState>,
+    app: String,
+    #[allow(non_snake_case)] providerId: String,
+) -> Result<u64, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    state
+        .db
+        .reset_all_provider_keys_health(app_type.as_str(), &providerId)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn remove_provider_from_live_config(
     state: tauri::State<'_, AppState>,
     app: String,

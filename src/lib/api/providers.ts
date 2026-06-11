@@ -159,6 +159,13 @@ export const providersApi = {
     });
   },
 
+  async resetAllKeysHealth(appId: AppId, providerId: string): Promise<number> {
+    return await invoke("reset_all_provider_key_health", {
+      app: appId,
+      providerId,
+    });
+  },
+
   /**
    * Remove provider from live config only (for additive mode apps like OpenCode)
    * Does NOT delete from database - provider remains in the list

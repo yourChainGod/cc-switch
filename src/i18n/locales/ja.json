@@ -191,6 +191,8 @@
     "copied": "Key をコピーしました",
     "copyFailed": "Key のコピーに失敗しました",
     "clearCooldown": "クールダウン解除",
+    "resetAll": "すべてのクールダウンを解除",
+    "resetAllDone": "{{count}} 個のキーの状態をリセットしました",
     "setConfigKey": "この Key を使用",
     "poolSeeded": "Key プールを作成しました（{{count}} 個）",
     "poolSeedFailed": "プロバイダーは作成されましたが、一部の Key の追加に失敗しました"

@@ -422,6 +422,7 @@ function ProviderFormFull({
     showApiKey: shouldShowApiKey,
   } = useApiKeyState({
     initialConfig: form.getValues("settingsConfig"),
+    getConfig: () => form.getValues("settingsConfig"),
     onConfigChange: handleSettingsConfigChange,
     selectedPresetId,
     category,

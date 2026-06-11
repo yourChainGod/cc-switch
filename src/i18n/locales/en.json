@@ -226,6 +226,8 @@
     "copied": "Key copied",
     "copyFailed": "Failed to copy key",
     "clearCooldown": "Clear cooldown",
+    "resetAll": "Clear all cooldowns",
+    "resetAllDone": "Reset health state for {{count}} keys",
     "poolSeeded": "Key pool created ({{count}} keys)",
     "poolSeedFailed": "Provider created, but some keys failed to be added to the pool"
   },

@@ -226,6 +226,8 @@
     "copied": "已复制 Key",
     "copyFailed": "复制 Key 失败",
     "clearCooldown": "清除冷却",
+    "resetAll": "重置所有冷却",
+    "resetAllDone": "已重置 {{count}} 个 Key 的健康状态",
     "poolSeeded": "已创建 Key 池（{{count}} 个 Key）",
     "poolSeedFailed": "供应商已创建，但部分 Key 写入 Key 池失败"
   },

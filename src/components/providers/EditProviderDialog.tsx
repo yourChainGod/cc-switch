@@ -614,6 +614,34 @@ export function EditProviderDialog({
     [activeProvider, appId, loadProviderKeys, refreshProviderKeySummaries, t],
   );
 
+  const handleResetAllKeys = useCallback(async () => {
+    if (!activeProvider) return;
+    setIsKeysSaving(true);
+    try {
+      const count = await providersApi.resetAllKeysHealth(
+        appId,
+        activeProvider.id,
+      );
+      await loadProviderKeys();
+      await refreshProviderKeySummaries();
+      toast.success(
+        t("providerKeys.resetAllDone", {
+          count,
+          defaultValue: "Reset health state for {{count}} keys",
+        }),
+      );
+    } catch (error) {
+      console.error("Failed to reset provider keys:", error);
+      toast.error(
+        t("providerKeys.resetFailed", {
+          defaultValue: "Failed to reset provider key",
+        }),
+      );
+    } finally {
+      setIsKeysSaving(false);
+    }
+  }, [activeProvider, appId, loadProviderKeys, refreshProviderKeySummaries, t]);
+
   const keyIssueCount = useMemo(
     () =>
       providerKeys.filter((key) => !key.enabled || key.status !== "active")
@@ -651,6 +679,7 @@ export function EditProviderDialog({
         void handleUpdateKeySchedule(key, updates),
       deleteKey: (key) => void handleDeleteKey(key),
       resetKey: (key) => void handleResetKey(key),
+      resetAllKeys: () => void handleResetAllKeys(),
       setConfigKey: (key) => void handleSetConfigKey(key),
       setConfigKeyAuto: () => void handleSetConfigKeyAuto(),
     }),
@@ -669,6 +698,7 @@ export function EditProviderDialog({
       handleUpdateKeySchedule,
       handleDeleteKey,
       handleResetKey,
+      handleResetAllKeys,
       handleSetConfigKey,
       handleSetConfigKeyAuto,
     ],

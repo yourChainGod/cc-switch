@@ -1137,6 +1137,7 @@ pub fn run() {
             commands::set_provider_config_key_auto,
             commands::delete_provider_key,
             commands::reset_provider_key_health,
+            commands::reset_all_provider_key_health,
             commands::remove_provider_from_live_config,
             commands::switch_provider,
             commands::import_default_config,

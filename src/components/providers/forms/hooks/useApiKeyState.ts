@@ -9,6 +9,9 @@ import {
 
 interface UseApiKeyStateProps {
   initialConfig?: string;
+  /** 读取表单当前配置；handleApiKeyChange 必须基于实时值打补丁，
+   *  否则会用渲染时的过期快照整体覆盖用户刚编辑的 JSON */
+  getConfig?: () => string;
   onConfigChange: (config: string) => void;
   selectedPresetId: string | null;
   category?: ProviderCategory;
@@ -22,6 +25,7 @@ interface UseApiKeyStateProps {
  */
 export function useApiKeyState({
   initialConfig,
+  getConfig,
   onConfigChange,
   selectedPresetId,
   category,
@@ -64,7 +68,9 @@ export function useApiKeyState({
       const keys = appType === "claude" ? splitApiKeys(key) : [key.trim()];
       const configKey = keys[0] ?? "";
 
-      const configString = setApiKeyInConfig(initialConfig || "{}", configKey, {
+      // 基于表单实时配置打补丁，保留用户已编辑的其他字段
+      const currentConfig = getConfig?.() ?? initialConfig ?? "{}";
+      const configString = setApiKeyInConfig(currentConfig || "{}", configKey, {
           // 最佳实践：仅在"新增模式"且"非官方类别"时补齐缺失字段
           // - 新增模式：selectedPresetId !== null
           // - 非官方类别：category !== undefined && category !== "official"
@@ -83,6 +89,7 @@ export function useApiKeyState({
     },
     [
       initialConfig,
+      getConfig,
       selectedPresetId,
       category,
       appType,

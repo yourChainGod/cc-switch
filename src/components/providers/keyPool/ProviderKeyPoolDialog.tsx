@@ -55,6 +55,7 @@ export interface ProviderKeyPoolController {
   ) => void;
   deleteKey: (key: ProviderKey) => void;
   resetKey: (key: ProviderKey) => void;
+  resetAllKeys: () => void;
   setConfigKey: (key: ProviderKey) => void;
   setConfigKeyAuto: () => void;
 }
@@ -160,6 +161,34 @@ export function ProviderKeyPoolDialog({
 
         <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
           <div className="flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-amber-600 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-400"
+              onClick={() => pool.resetAllKeys()}
+              disabled={
+                pool.isSaving ||
+                pool.isLoading ||
+                !pool.keys.some(
+                  (key) =>
+                    key.status === "cooldown" ||
+                    key.status === "degraded" ||
+                    key.consecutiveFailures > 0,
+                )
+              }
+              aria-label={t("providerKeys.resetAll", {
+                defaultValue: "Clear all cooldowns",
+              })}
+              title={t("providerKeys.resetAll", {
+                defaultValue: "Clear all cooldowns",
+              })}
+            >
+              <TimerOff className="h-4 w-4" />
+              {t("providerKeys.resetAll", {
+                defaultValue: "Clear all cooldowns",
+              })}
+            </Button>
             <Button
               type="button"
               variant="ghost"

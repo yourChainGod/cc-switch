@@ -15,10 +15,9 @@
 
 ## 相对上游的主要修改
 
-### ✂️ 移除（去广告、去冗余）
+### ✂️ 精简
 
-- **移除全部推广位预设供应商**：Claude / Codex / Gemini / Claude Desktop / OpenCode / OpenClaw / Hermes 七个应用的预设列表只保留**官方**与**自定义**入口（OpenCode 额外保留 OMO / OMO Slim 功能模板），删除了几百个聚合站、第三方中转的推广预设
-- **移除合作伙伴促销体系**：赞助横幅、优惠码文案、"官方合作伙伴"徽标等全部删除
+- **预设供应商列表精简**：七个应用的预设只保留**官方**与**自定义**入口（OpenCode 额外保留 OMO / OMO Slim 功能模板），聚焦自有供应商配置
 - **移除 GitHub Copilot 接入**（含 Copilot 模型映射、请求优化器、配额展示）
 - **移除 Codex OAuth 账号代理**（accounts 模式及配额页脚）
 - **移除应用内自更新**（tauri-plugin-updater）与"关于"页的 CC Switch 版本检测区块，"关于"页聚焦本地 CLI 工具环境检查
