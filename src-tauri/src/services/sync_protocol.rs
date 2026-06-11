@@ -24,7 +24,10 @@ pub(crate) use super::webdav_sync::archive::{
 /// Retains historic "webdav" naming for backward compatibility with existing remotes.
 pub(crate) const PROTOCOL_FORMAT: &str = "cc-switch-webdav-sync";
 pub(crate) const PROTOCOL_VERSION: u32 = 2;
-pub(crate) const DB_COMPAT_VERSION: u32 = 6;
+/// 本 fork 的 schema 已与上游分叉（key 池、会话亲和等表 + 独立迁移链）。
+/// 上游沿用 6 并会继续递增；这里跳到 100 起步，确保 fork 与上游构建
+/// 不会把同一个云端远端误判为兼容而交叉导入。
+pub(crate) const DB_COMPAT_VERSION: u32 = 100;
 pub(crate) const LEGACY_DB_COMPAT_VERSION: u32 = 5;
 pub(crate) const REMOTE_DB_SQL: &str = "db.sql";
 pub(crate) const REMOTE_SKILLS_ZIP: &str = "skills.zip";

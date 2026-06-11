@@ -219,7 +219,7 @@ async fn download_and_verify(
 /// Build the S3 object key for a given artifact.
 ///
 /// Format: `{remote_root}/v{PROTOCOL_VERSION}/db-v{DB_COMPAT_VERSION}/{profile}/{artifact}`
-/// Example: `cc-switch-sync/v2/db-v6/default/manifest.json`
+/// Example: `cc-switch-sync/v2/db-v100/default/manifest.json`
 fn s3_key(settings: &S3SyncSettings, artifact: &str) -> String {
     format!(
         "{}/v{}/db-v{}/{}/{}",
@@ -262,7 +262,10 @@ mod tests {
     fn s3_key_uses_v2_and_correct_format() {
         let settings = test_settings();
         let key = s3_key(&settings, "manifest.json");
-        assert_eq!(key, "cc-switch-sync/v2/db-v6/default/manifest.json");
+        assert_eq!(
+            key,
+            format!("cc-switch-sync/v2/db-v{DB_COMPAT_VERSION}/default/manifest.json")
+        );
     }
 
     #[test]
@@ -272,7 +275,10 @@ mod tests {
             profile: "work".to_string(),
             ..S3SyncSettings::default()
         };
-        assert_eq!(s3_key(&settings, "db.sql"), "my-root/v2/db-v6/work/db.sql");
+        assert_eq!(
+            s3_key(&settings, "db.sql"),
+            format!("my-root/v2/db-v{DB_COMPAT_VERSION}/work/db.sql")
+        );
     }
 
     #[test]
@@ -284,7 +290,7 @@ mod tests {
         assert_eq!(parts.len(), 5);
         assert_eq!(parts[0], "cc-switch-sync");
         assert_eq!(parts[1], "v2");
-        assert_eq!(parts[2], "db-v6");
+        assert_eq!(parts[2], format!("db-v{DB_COMPAT_VERSION}"));
         assert_eq!(parts[3], "default");
         assert_eq!(parts[4], "skills.zip");
     }

@@ -318,6 +318,10 @@ impl Database {
         provider_id: &str,
         key_id: &str,
     ) -> Result<bool, AppError> {
+        // 代理热路径每个请求都会落一次健康状态；provider_keys 在自动同步
+        // 触发白名单里，这类运行时写入必须抑制，否则会引发同步风暴。
+        let _webdav_guard = crate::services::webdav_auto_sync::AutoSyncSuppressionGuard::new();
+        let _s3_guard = crate::services::s3_auto_sync::AutoSyncSuppressionGuard::new();
         let now = now_ts();
         let conn = lock_conn!(self.conn);
         let updated = conn
@@ -349,6 +353,9 @@ impl Database {
         cooldown_base_seconds: i64,
         cooldown_cap_seconds: i64,
     ) -> Result<bool, AppError> {
+        // 同 record_provider_key_success：运行时健康写入不触发自动同步。
+        let _webdav_guard = crate::services::webdav_auto_sync::AutoSyncSuppressionGuard::new();
+        let _s3_guard = crate::services::s3_auto_sync::AutoSyncSuppressionGuard::new();
         let now = now_ts();
         let conn = lock_conn!(self.conn);
 

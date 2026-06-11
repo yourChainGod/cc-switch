@@ -16,12 +16,17 @@ use tempfile::NamedTempFile;
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
+/// 除日志/统计外，会话亲和与 session_log_sync 属于设备本地运行时状态
+/// （session_log_sync 甚至存的是本机文件路径），不应跨设备同步。
 const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
     "provider_health",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "session_affinity",
+    "working_channel_affinity",
+    "session_log_sync",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -31,6 +36,9 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "stream_check_logs",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "session_affinity",
+    "working_channel_affinity",
+    "session_log_sync",
 ];
 
 /// A database backup entry for the UI
@@ -88,7 +96,28 @@ impl Database {
     /// Import SQL generated for sync, then restore local-only tables from the
     /// current device snapshot before replacing the main database.
     pub(crate) fn import_sql_string_for_sync(&self, sql_raw: &str) -> Result<String, AppError> {
-        self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES)
+        let backup_id = self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES)?;
+        self.sanitize_synced_key_runtime_state()?;
+        Ok(backup_id)
+    }
+
+    /// provider_keys 的 key 配置（key 值/优先级/权重）需要跨设备同步，但
+    /// 冷却/连续失败等运行时健康状态是按设备累积的，导入后一律重置，
+    /// 避免本机无故继承其他设备的冷却。
+    fn sanitize_synced_key_runtime_state(&self) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "UPDATE provider_keys
+             SET status = CASE WHEN enabled = 1 THEN 'active' ELSE 'disabled' END,
+                 consecutive_failures = 0,
+                 cooldown_until = NULL
+             WHERE status IN ('cooldown', 'degraded')
+                OR cooldown_until IS NOT NULL
+                OR consecutive_failures != 0",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("重置同步导入的 Key 运行时状态失败: {e}")))?;
+        Ok(())
     }
 
     fn import_sql_string_inner(
@@ -704,8 +733,21 @@ mod tests {
                  VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
                 [],
             )?;
+            // 远端 key 带着对端设备的冷却/失败状态，导入后应被重置
+            conn.execute(
+                "INSERT INTO provider_keys (
+                    id, app_type, provider_id, name, key_value, enabled, priority, weight,
+                    status, consecutive_failures, cooldown_until, created_at, updated_at
+                ) VALUES ('remote-key', 'claude', 'remote-provider', 'Key 1', 'sk-remote', 1, 0, 1,
+                    'cooldown', 3, 99999999999, 1000, 1000)",
+                [],
+            )?;
         }
         let remote_sql = remote_db.export_sql_string_for_sync()?;
+        assert!(
+            !remote_sql.contains("INSERT INTO \"session_affinity\""),
+            "session_affinity rows must not be exported for sync"
+        );
 
         let local_db = Database::memory()?;
         {
@@ -736,6 +778,22 @@ mod tests {
                     provider_id, provider_name, app_type, status, success, message,
                     response_time_ms, http_status, model_used, retry_count, tested_at
                 ) VALUES ('local-provider', 'Local Provider', 'claude', 'operational', 1, 'ok', 42, 200, 'claude-3', 0, 1000)",
+                [],
+            )?;
+            // 设备本地运行时状态：导入远端快照后应原样保留
+            conn.execute(
+                "INSERT INTO session_affinity (app_type, session_id, provider_id, key_id, expires_at, updated_at)
+                 VALUES ('claude', 'sess-1', 'local-provider', NULL, 99999999999, 1000)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO working_channel_affinity (app_type, provider_id, key_id, expires_at, updated_at)
+                 VALUES ('claude', 'local-provider', NULL, 99999999999, 1000)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO session_log_sync (file_path, last_modified, last_line_offset, last_synced_at)
+                 VALUES ('/local/path/session.jsonl', 1000, 42, 1000)",
                 [],
             )?;
         }
@@ -777,6 +835,37 @@ mod tests {
             stream_logs, 1,
             "local stream check logs should be preserved"
         );
+
+        {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            let affinity: i64 =
+                conn.query_row("SELECT COUNT(*) FROM session_affinity", [], |row| {
+                    row.get(0)
+                })?;
+            assert_eq!(affinity, 1, "local session affinity should be preserved");
+            let working: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM working_channel_affinity",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(working, 1, "local working channel affinity should be preserved");
+            let log_sync: i64 =
+                conn.query_row("SELECT COUNT(*) FROM session_log_sync", [], |row| {
+                    row.get(0)
+                })?;
+            assert_eq!(log_sync, 1, "local session log sync state should be preserved");
+
+            // 远端 key 配置同步进来，但运行时健康状态被重置
+            let (status, failures, cooldown): (String, i64, Option<i64>) = conn.query_row(
+                "SELECT status, consecutive_failures, cooldown_until
+                 FROM provider_keys WHERE id = 'remote-key'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(status, "active", "imported key runtime status should reset");
+            assert_eq!(failures, 0, "imported key failures should reset");
+            assert!(cooldown.is_none(), "imported key cooldown should reset");
+        }
 
         Ok(())
     }

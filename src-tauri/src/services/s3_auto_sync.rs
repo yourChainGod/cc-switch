@@ -46,6 +46,7 @@ pub fn should_trigger_for_table(table: &str) -> bool {
         normalized.as_str(),
         "providers"
             | "provider_endpoints"
+            | "provider_keys"
             | "mcp_servers"
             | "prompts"
             | "skills"
@@ -203,9 +204,13 @@ mod tests {
     #[test]
     fn should_trigger_sync_for_config_tables_only() {
         assert!(should_trigger_for_table("providers"));
+        assert!(should_trigger_for_table("provider_keys"));
         assert!(should_trigger_for_table("settings"));
         assert!(!should_trigger_for_table("proxy_request_logs"));
         assert!(!should_trigger_for_table("provider_health"));
+        assert!(!should_trigger_for_table("session_affinity"));
+        assert!(!should_trigger_for_table("working_channel_affinity"));
+        assert!(!should_trigger_for_table("session_log_sync"));
     }
 
     #[test]

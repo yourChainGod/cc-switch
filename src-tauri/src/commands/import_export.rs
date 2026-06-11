@@ -154,10 +154,18 @@ pub async fn restore_db_backup(
     filename: String,
 ) -> Result<String, String> {
     let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || db.restore_from_backup(&filename))
-        .await
-        .map_err(|e| format!("Restore failed: {e}"))?
-        .map_err(|e: AppError| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        let safety_id = db.restore_from_backup(&filename)?;
+        // 与 SQL 导入路径保持一致：恢复后把当前供应商重新同步到 live 配置，
+        // 避免 live 文件停留在恢复前的状态。失败仅告警，不影响恢复结果。
+        if let Some(msg) = post_sync_warning_from_result(Ok(run_post_import_sync(db.clone()))) {
+            log::warn!("[Restore] post-restore sync warning: {msg}");
+        }
+        Ok::<_, AppError>(safety_id)
+    })
+    .await
+    .map_err(|e| format!("Restore failed: {e}"))?
+    .map_err(|e: AppError| e.to_string())
 }
 
 /// Rename a database backup file
