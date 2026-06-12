@@ -33,7 +33,10 @@ pub enum ProxyError {
     AllProvidersCircuitOpen,
 
     #[error("Provider Key Pool 中没有可用 Key")]
-    NoProviderKeysAvailable,
+    NoProviderKeysAvailable {
+        /// 距最早一个冷却中 Key 恢复还有多少秒（用于响应 Retry-After 头）
+        retry_after_secs: Option<u64>,
+    },
 
     #[error("未配置供应商")]
     NoProvidersConfigured,
@@ -43,7 +46,13 @@ pub enum ProxyError {
     ProviderUnhealthy(String),
 
     #[error("上游错误 (状态码 {status}): {body:?}")]
-    UpstreamError { status: u16, body: Option<String> },
+    UpstreamError {
+        status: u16,
+        body: Option<String>,
+        /// 上游响应头 Retry-After 折算的秒数（429/503 常见），
+        /// 用于精确冷却和向客户端回传退避提示
+        retry_after: Option<u64>,
+    },
 
     #[error("超过最大重试次数")]
     MaxRetriesExceeded,
@@ -81,10 +90,12 @@ pub enum ProxyError {
 
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
+        let retry_after_secs = self.retry_after_secs();
         let (status, body) = match &self {
             ProxyError::UpstreamError {
                 status: upstream_status,
                 body: upstream_body,
+                ..
             } => {
                 let http_status =
                     StatusCode::from_u16(*upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -134,7 +145,7 @@ impl IntoResponse for ProxyError {
                     ProxyError::AllProvidersCircuitOpen => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
-                    ProxyError::NoProviderKeysAvailable => {
+                    ProxyError::NoProviderKeysAvailable { .. } => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
                     ProxyError::NoProvidersConfigured => {
@@ -176,7 +187,28 @@ impl IntoResponse for ProxyError {
             }
         };
 
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if let Some(secs) = retry_after_secs {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, secs.into());
+        }
+        response
+    }
+}
+
+impl ProxyError {
+    /// 该错误应向客户端建议的退避秒数（写入 Retry-After 响应头）。
+    ///
+    /// - 上游错误：透传上游给的 Retry-After（429/503 常见，原本会在重建
+    ///   错误体时被丢掉）
+    /// - Key 池全部冷却：距最早一个 Key 恢复的秒数
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            ProxyError::UpstreamError { retry_after, .. } => *retry_after,
+            ProxyError::NoProviderKeysAvailable { retry_after_secs } => *retry_after_secs,
+            _ => None,
+        }
     }
 }
 
@@ -208,5 +240,67 @@ pub fn categorize_error(error: &reqwest::Error) -> ErrorCategory {
         }
     } else {
         ErrorCategory::Retryable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::header::RETRY_AFTER;
+
+    #[test]
+    fn upstream_error_response_carries_retry_after_header() {
+        let response = ProxyError::UpstreamError {
+            status: 429,
+            body: Some(r#"{"error":{"message":"rate limited"}}"#.to_string()),
+            retry_after: Some(37),
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("37")
+        );
+    }
+
+    #[test]
+    fn key_pool_exhausted_response_carries_recovery_hint() {
+        let response = ProxyError::NoProviderKeysAvailable {
+            retry_after_secs: Some(42),
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("42")
+        );
+    }
+
+    #[test]
+    fn responses_without_backoff_hint_omit_retry_after() {
+        let upstream = ProxyError::UpstreamError {
+            status: 502,
+            body: None,
+            retry_after: None,
+        }
+        .into_response();
+        assert!(upstream.headers().get(RETRY_AFTER).is_none());
+
+        let exhausted = ProxyError::NoProviderKeysAvailable {
+            retry_after_secs: None,
+        }
+        .into_response();
+        assert!(exhausted.headers().get(RETRY_AFTER).is_none());
+
+        let timeout = ProxyError::Timeout("t".to_string()).into_response();
+        assert!(timeout.headers().get(RETRY_AFTER).is_none());
     }
 }

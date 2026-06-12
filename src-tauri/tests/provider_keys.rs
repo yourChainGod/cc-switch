@@ -61,7 +61,7 @@ fn provider_key_pool_crud_and_cascade_delete() {
     assert_eq!(keys[1].id, later.id);
 
     assert!(db
-        .record_provider_key_failure(app_type, "provider-a", &earlier.id, 60, 60)
+        .record_provider_key_failure(app_type, "provider-a", &earlier.id, 60, 60, 0)
         .expect("record key failure"));
     let enabled = db
         .get_enabled_provider_keys(app_type, "provider-a")
@@ -182,9 +182,9 @@ fn provider_key_summaries_return_aggregate_health_without_key_values() {
     )
     .expect("insert disabled key");
 
-    db.record_provider_key_failure(app_type, "provider-a", &cooldown.id, 60, 60)
+    db.record_provider_key_failure(app_type, "provider-a", &cooldown.id, 60, 60, 0)
         .expect("mark cooldown key");
-    db.record_provider_key_failure(app_type, "provider-a", &degraded.id, 0, 0)
+    db.record_provider_key_failure(app_type, "provider-a", &degraded.id, 0, 0, 0)
         .expect("mark degraded key");
 
     let summaries = db
@@ -1201,4 +1201,245 @@ fn working_channel_affinity_upsert_get_and_delete_matching_channel() {
         .get_working_channel_affinity("claude")
         .expect("get deleted working channel")
         .is_none());
+}
+
+/// 429 宽限重试：连续失败未达宽限次数前只标 Degraded（留在轮转中），
+/// 达到后才进入冷却，且指数从 (失败数 - 宽限) 起算；成功一次全部清零。
+#[test]
+fn rate_limit_grace_keeps_key_in_rotation_before_cooldown() {
+    let db = Database::memory().expect("create memory database");
+    let app_type = AppType::Claude.as_str();
+
+    let provider = Provider {
+        id: "provider-a".to_string(),
+        name: "Provider A".to_string(),
+        settings_config: json!({"env": {"ANTHROPIC_API_KEY": "legacy-key"}}),
+        website_url: None,
+        category: Some("third_party".to_string()),
+        created_at: Some(1),
+        sort_index: Some(1),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider(app_type, &provider)
+        .expect("save provider fixture");
+
+    let key = db
+        .add_provider_key(
+            app_type,
+            "provider-a",
+            &ProviderKeyInput {
+                name: "limited".to_string(),
+                key_value: "sk-limited".to_string(),
+                auth_field: None,
+                enabled: true,
+                priority: 10,
+                weight: 1,
+            },
+        )
+        .expect("insert key");
+
+    let grace = 3i64;
+    // 前 3 次连续 429：不冷却，仍可被调度
+    for round in 1..=grace {
+        assert!(db
+            .record_provider_key_failure(app_type, "provider-a", &key.id, 30, 600, grace)
+            .expect("record graced failure"));
+        let current = db
+            .get_provider_key(app_type, "provider-a", &key.id)
+            .expect("get key")
+            .expect("key exists");
+        assert_eq!(current.consecutive_failures, round, "failures accumulate");
+        assert!(
+            current.cooldown_until.is_none(),
+            "round {round}: within grace, no cooldown"
+        );
+        assert_eq!(current.status.as_str(), "degraded");
+        let enabled = db
+            .get_enabled_provider_keys(app_type, "provider-a")
+            .expect("enabled keys");
+        assert_eq!(enabled.len(), 1, "round {round}: key stays in rotation");
+    }
+
+    // 第 4 次：prior_failures(3) >= grace(3)，进入冷却，时长 = 30 × 2^0 = 30s
+    let before = chrono::Utc::now().timestamp();
+    assert!(db
+        .record_provider_key_failure(app_type, "provider-a", &key.id, 30, 600, grace)
+        .expect("record cooled failure"));
+    let cooled = db
+        .get_provider_key(app_type, "provider-a", &key.id)
+        .expect("get key")
+        .expect("key exists");
+    assert_eq!(cooled.status.as_str(), "cooldown");
+    let until = cooled.cooldown_until.expect("cooldown set after grace");
+    assert!(
+        (until - before - 30).abs() <= 2,
+        "first cooldown ≈ base 30s (got {}s)",
+        until - before
+    );
+    assert!(db
+        .get_enabled_provider_keys(app_type, "provider-a")
+        .expect("enabled keys")
+        .is_empty());
+
+    // 第 5 次：指数推进到 30 × 2^1 = 60s
+    let before = chrono::Utc::now().timestamp();
+    assert!(db
+        .record_provider_key_failure(app_type, "provider-a", &key.id, 30, 600, grace)
+        .expect("record escalated failure"));
+    let escalated = db
+        .get_provider_key(app_type, "provider-a", &key.id)
+        .expect("get key")
+        .expect("key exists");
+    let until = escalated.cooldown_until.expect("cooldown escalates");
+    assert!(
+        (until - before - 60).abs() <= 2,
+        "second cooldown ≈ 60s (got {}s)",
+        until - before
+    );
+
+    // 一次成功把失败计数、冷却全部清零
+    assert!(db
+        .record_provider_key_success(app_type, "provider-a", &key.id)
+        .expect("record success"));
+    let recovered = db
+        .get_provider_key(app_type, "provider-a", &key.id)
+        .expect("get key")
+        .expect("key exists");
+    assert_eq!(recovered.consecutive_failures, 0);
+    assert!(recovered.cooldown_until.is_none());
+    assert_eq!(recovered.status.as_str(), "active");
+}
+
+/// grace=0 必须保持旧行为：首次失败立即按 base × 2^prior 冷却。
+#[test]
+fn zero_grace_cooldown_keeps_legacy_backoff_semantics() {
+    let db = Database::memory().expect("create memory database");
+    let app_type = AppType::Claude.as_str();
+
+    let provider = Provider {
+        id: "provider-a".to_string(),
+        name: "Provider A".to_string(),
+        settings_config: json!({}),
+        website_url: None,
+        category: Some("third_party".to_string()),
+        created_at: Some(1),
+        sort_index: Some(1),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider(app_type, &provider)
+        .expect("save provider fixture");
+    let key = db
+        .add_provider_key(
+            app_type,
+            "provider-a",
+            &ProviderKeyInput {
+                name: "k".to_string(),
+                key_value: "sk-k".to_string(),
+                auth_field: None,
+                enabled: true,
+                priority: 10,
+                weight: 1,
+            },
+        )
+        .expect("insert key");
+
+    let before = chrono::Utc::now().timestamp();
+    assert!(db
+        .record_provider_key_failure(app_type, "provider-a", &key.id, 60, 1800, 0)
+        .expect("record failure"));
+    let cooled = db
+        .get_provider_key(app_type, "provider-a", &key.id)
+        .expect("get key")
+        .expect("key exists");
+    let until = cooled.cooldown_until.expect("immediate cooldown when grace=0");
+    assert!((until - before - 60).abs() <= 2, "first cooldown ≈ 60s");
+}
+
+/// earliest_provider_key_recovery_secs：取启用 Key 中最早的冷却恢复时间；
+/// 停用 Key 不计入；没有冷却时返回 None。
+#[test]
+fn earliest_recovery_secs_reports_minimum_enabled_cooldown() {
+    let db = Database::memory().expect("create memory database");
+    let app_type = AppType::Claude.as_str();
+
+    let provider = Provider {
+        id: "provider-a".to_string(),
+        name: "Provider A".to_string(),
+        settings_config: json!({}),
+        website_url: None,
+        category: Some("third_party".to_string()),
+        created_at: Some(1),
+        sort_index: Some(1),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider(app_type, &provider)
+        .expect("save provider fixture");
+
+    let mk_key = |name: &str, priority: i64| ProviderKeyInput {
+        name: name.to_string(),
+        key_value: format!("sk-{name}"),
+        auth_field: None,
+        enabled: true,
+        priority,
+        weight: 1,
+    };
+    let short = db
+        .add_provider_key(app_type, "provider-a", &mk_key("short", 10))
+        .expect("insert short");
+    let long = db
+        .add_provider_key(app_type, "provider-a", &mk_key("long", 20))
+        .expect("insert long");
+    let disabled = db
+        .add_provider_key(app_type, "provider-a", &mk_key("disabled", 30))
+        .expect("insert disabled");
+
+    assert_eq!(
+        db.earliest_provider_key_recovery_secs(app_type)
+            .expect("query without cooldown"),
+        None,
+        "no cooldown yet"
+    );
+
+    // short 冷却 60s、long 冷却 600s、disabled 冷却 5s 后停用（不应计入）
+    db.record_provider_key_failure(app_type, "provider-a", &short.id, 60, 60, 0)
+        .expect("cool short");
+    db.record_provider_key_failure(app_type, "provider-a", &long.id, 600, 600, 0)
+        .expect("cool long");
+    db.record_provider_key_failure(app_type, "provider-a", &disabled.id, 5, 5, 0)
+        .expect("cool disabled");
+    db.update_provider_key(
+        app_type,
+        "provider-a",
+        &disabled.id,
+        &ProviderKeyInput {
+            name: "disabled".to_string(),
+            key_value: "sk-disabled".to_string(),
+            auth_field: None,
+            enabled: false,
+            priority: 30,
+            weight: 1,
+        },
+    )
+    .expect("disable key");
+
+    let secs = db
+        .earliest_provider_key_recovery_secs(app_type)
+        .expect("query earliest recovery")
+        .expect("cooldown present");
+    assert!(
+        (1..=60).contains(&secs),
+        "earliest should be short key's ≈60s, got {secs}s"
+    );
 }

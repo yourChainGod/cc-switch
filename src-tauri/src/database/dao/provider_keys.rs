@@ -334,6 +334,29 @@ impl Database {
         Ok(updated as u64)
     }
 
+    /// 该应用下最早一个冷却中 Key 距恢复还有多少秒（用于 503 响应的 Retry-After）。
+    ///
+    /// 只统计启用且未停用的 Key；没有任何 Key 在冷却时返回 None。
+    pub fn earliest_provider_key_recovery_secs(
+        &self,
+        app_type: &str,
+    ) -> Result<Option<u64>, AppError> {
+        let now = now_ts();
+        let conn = lock_conn!(self.conn);
+        let earliest: Option<i64> = conn
+            .query_row(
+                "SELECT MIN(cooldown_until) FROM provider_keys
+                 WHERE app_type = ?1
+                   AND enabled = 1
+                   AND status != 'disabled'
+                   AND cooldown_until > ?2",
+                params![app_type, now],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(earliest.map(|until| (until - now).max(1) as u64))
+    }
+
     pub fn record_provider_key_success(
         &self,
         app_type: &str,
@@ -364,9 +387,13 @@ impl Database {
 
     /// 记录 Key 失败并按指数退避计算冷却时长（ccLoad 风格）。
     ///
-    /// 冷却秒数 = min(base × 2^已有连续失败数, cap)，成功后由
+    /// 冷却秒数 = min(base × 2^(已有连续失败数 - 宽限), cap)，成功后由
     /// `record_provider_key_success` 清零。`base_seconds <= 0` 表示不冷却，
     /// 仅标记 Degraded。
+    ///
+    /// `grace_failures` 为冷却宽限：已有连续失败数未达到该值时不进入冷却，
+    /// 只标 Degraded（留在轮转中，组内按失败数降序靠后）。瞬时限流（429）
+    /// 用它实现"多重试少冷却"。传 0 即原有行为。
     pub fn record_provider_key_failure(
         &self,
         app_type: &str,
@@ -374,6 +401,7 @@ impl Database {
         key_id: &str,
         cooldown_base_seconds: i64,
         cooldown_cap_seconds: i64,
+        grace_failures: i64,
     ) -> Result<bool, AppError> {
         // 同 record_provider_key_success：运行时健康写入不触发自动同步。
         let _webdav_guard = crate::services::webdav_auto_sync::AutoSyncSuppressionGuard::new();
@@ -390,9 +418,10 @@ impl Database {
             )
             .unwrap_or(0);
 
-        let cooldown_until = if cooldown_base_seconds > 0 {
+        let cooldown_until = if cooldown_base_seconds > 0 && prior_failures >= grace_failures {
+            let exponent = (prior_failures - grace_failures).clamp(0, 16) as u32;
             let backoff = cooldown_base_seconds
-                .saturating_mul(1i64 << prior_failures.clamp(0, 16) as u32)
+                .saturating_mul(1i64 << exponent)
                 .min(cooldown_cap_seconds.max(cooldown_base_seconds));
             Some(now + backoff)
         } else {

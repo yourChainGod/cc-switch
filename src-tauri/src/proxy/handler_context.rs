@@ -140,7 +140,13 @@ impl RequestContext {
                     ProxyError::AllProvidersCircuitOpen
                 }
                 crate::error::AppError::NoProviderKeysAvailable => {
-                    ProxyError::NoProviderKeysAvailable
+                    // 全部 Key 都在冷却时给客户端一个准确的退避提示（Retry-After）
+                    let retry_after_secs = state
+                        .db
+                        .earliest_provider_key_recovery_secs(app_type_str)
+                        .ok()
+                        .flatten();
+                    ProxyError::NoProviderKeysAvailable { retry_after_secs }
                 }
                 crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
                 _ => ProxyError::DatabaseError(e.to_string()),

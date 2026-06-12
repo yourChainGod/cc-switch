@@ -402,10 +402,17 @@ impl RequestForwarder {
         let Some(key_id) = key_id else {
             return;
         };
-        let (cooldown_base, cooldown_cap) = key_failure_cooldown(error);
+        let (cooldown_base, cooldown_cap, grace_failures) = key_failure_cooldown(error);
         if let Err(e) = self
             .router
-            .record_key_failure(&provider.id, app_type_str, key_id, cooldown_base, cooldown_cap)
+            .record_key_failure(
+                &provider.id,
+                app_type_str,
+                key_id,
+                cooldown_base,
+                cooldown_cap,
+                grace_failures,
+            )
             .await
         {
             log::warn!(
@@ -1771,11 +1778,13 @@ impl RequestForwarder {
             Ok((response, resolved_claude_api_format))
         } else {
             let status_code = status.as_u16();
+            let retry_after = parse_retry_after_header(response.headers());
             let body_text = String::from_utf8(response.bytes().await?.to_vec()).ok();
 
             Err(ProxyError::UpstreamError {
                 status: status_code,
                 body: body_text,
+                retry_after,
             })
         }
     }
@@ -1947,7 +1956,7 @@ fn build_terminal_failure_log(
 
 fn summarize_proxy_error(error: &ProxyError) -> String {
     match error {
-        ProxyError::UpstreamError { status, body } => {
+        ProxyError::UpstreamError { status, body, .. } => {
             let body_summary = body
                 .as_deref()
                 .map(summarize_upstream_body)
@@ -2170,7 +2179,7 @@ fn is_streaming_request(endpoint: &str, body: &Value, headers: &axum::http::Head
 fn is_key_scoped_error(error: &ProxyError) -> bool {
     match error {
         ProxyError::AuthError(_) => true,
-        ProxyError::UpstreamError { status, body } => {
+        ProxyError::UpstreamError { status, body, .. } => {
             matches!(*status, 401 | 403 | 429)
                 || body
                     .as_deref()
@@ -2194,21 +2203,34 @@ fn is_key_scoped_error(error: &ProxyError) -> bool {
     }
 }
 
-/// key 通道失败的冷却参数：(初始冷却秒数, 退避上限秒数)。
+/// key 通道失败的冷却策略：(初始冷却秒数, 退避上限秒数, 宽限次数)。
 ///
-/// 实际冷却 = min(初始 × 2^连续失败数, 上限)，由 DAO 计算（ccLoad 风格）。
-/// 任何可重试错误都只冷却当前 key 通道，不连坐同 provider 的其他 key。
-fn key_failure_cooldown(error: &ProxyError) -> (i64, i64) {
+/// 实际冷却 = min(初始 × 2^(连续失败数 - 宽限), 上限)，由 DAO 计算（ccLoad 风格）；
+/// 连续失败数未达到宽限次数前不冷却，只标 Degraded（留在轮转中、组内降序靠后）。
+/// 任何可重试错误都只作用于当前 key 通道，不连坐同 provider 的其他 key。
+///
+/// 优先级：
+/// 1. 429/5xx 且上游给了 Retry-After → 恰好冷却该秒数（上游最清楚自己何时恢复）
+/// 2. 配额/余额耗尽（含 429 配额型）→ 配额轨道，等待重置周期
+/// 3. 瞬时限流 429 → 前 3 次连续失败不冷却（限流多为分钟级窗口，应多重试；
+///    请求内本来就会切到下一个 key），之后才进入 30s 起步的短冷却
+/// 4. 认证 / 5xx / 其他 → 维持原有分轨
+fn key_failure_cooldown(error: &ProxyError) -> (i64, i64, i64) {
     const MINUTE: i64 = 60;
+    /// 瞬时 429 的冷却宽限：连续失败满 3 次才开始冷却
+    const RATE_LIMIT_GRACE_FAILURES: i64 = 3;
+
     match error {
         // 认证失效：起步 10 分钟，指数爬升到 24 小时（坏 key 快速退出轮转，但可自愈）
-        ProxyError::AuthError(_) => (10 * MINUTE, 24 * 60 * MINUTE),
+        ProxyError::AuthError(_) => (10 * MINUTE, 24 * 60 * MINUTE, 0),
         ProxyError::UpstreamError { status, .. } if matches!(*status, 401 | 403) => {
-            (10 * MINUTE, 24 * 60 * MINUTE)
+            (10 * MINUTE, 24 * 60 * MINUTE, 0)
         }
-        // 限流：短冷却快速恢复
-        ProxyError::UpstreamError { status, .. } if *status == 429 => (MINUTE, 30 * MINUTE),
-        ProxyError::UpstreamError { status, body } => {
+        ProxyError::UpstreamError {
+            status,
+            body,
+            retry_after,
+        } => {
             let quota_exhausted = body
                 .as_deref()
                 .map(|body| {
@@ -2219,19 +2241,59 @@ fn key_failure_cooldown(error: &ProxyError) -> (i64, i64) {
                         || lower.contains("credit")
                 })
                 .unwrap_or(false);
+
+            // 上游显式 Retry-After（仅限 429/5xx 这类"稍后重试"语义的状态码）：
+            // 冷却恰好该时长，不做指数放大；上限 1 小时防御异常值
+            if *status == 429 || *status >= 500 {
+                if let Some(ra) = retry_after {
+                    let secs = (*ra as i64).clamp(1, 60 * MINUTE);
+                    return (secs, secs, 0);
+                }
+            }
+
             if quota_exhausted {
-                // 配额/余额：等待重置周期
-                (5 * MINUTE, 60 * MINUTE)
+                // 配额/余额：等待重置周期（429 配额型也归入此轨，不再被短轨道截胡）
+                (5 * MINUTE, 60 * MINUTE, 0)
+            } else if *status == 429 {
+                // 瞬时限流：多重试少冷却 —— 宽限期内只降权不下场，
+                // 连续超限后用 30s→10min 的短退避保护上游
+                (30, 10 * MINUTE, RATE_LIMIT_GRACE_FAILURES)
             } else if *status >= 500 {
                 // 上游 5xx：该 key 对应的上游通道故障
-                (2 * MINUTE, 30 * MINUTE)
+                (2 * MINUTE, 30 * MINUTE, 0)
             } else {
-                (MINUTE, 30 * MINUTE)
+                (MINUTE, 30 * MINUTE, 0)
             }
         }
         // 超时/网络：最短冷却
-        _ => (MINUTE, 30 * MINUTE),
+        _ => (MINUTE, 30 * MINUTE, 0),
     }
+}
+
+/// 解析上游响应的 Retry-After 头（RFC 7231：delta-seconds 或 HTTP-date），
+/// 统一折算成秒。无头、非法值、过去时间均返回 None。
+fn parse_retry_after_header(headers: &axum::http::HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get(axum::http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    // delta-seconds（部分上游会给小数，向上取整）
+    if let Ok(secs) = raw.parse::<f64>() {
+        if !secs.is_finite() || secs <= 0.0 {
+            return None;
+        }
+        return Some(secs.ceil() as u64);
+    }
+
+    // HTTP-date（IMF-fixdate，chrono 的 RFC 2822 解析器接受 GMT 时区名）
+    let target = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    let delta = target.timestamp() - chrono::Utc::now().timestamp();
+    u64::try_from(delta).ok().filter(|secs| *secs > 0)
 }
 
 #[cfg(test)]
@@ -2341,6 +2403,146 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
+
+    fn upstream_error(status: u16, body: Option<&str>, retry_after: Option<u64>) -> ProxyError {
+        ProxyError::UpstreamError {
+            status,
+            body: body.map(ToString::to_string),
+            retry_after,
+        }
+    }
+
+    #[test]
+    fn parse_retry_after_accepts_delta_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::RETRY_AFTER,
+            HeaderValue::from_static("120"),
+        );
+        assert_eq!(parse_retry_after_header(&headers), Some(120));
+    }
+
+    #[test]
+    fn parse_retry_after_ceils_fractional_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::RETRY_AFTER,
+            HeaderValue::from_static("0.5"),
+        );
+        assert_eq!(parse_retry_after_header(&headers), Some(1));
+    }
+
+    #[test]
+    fn parse_retry_after_rejects_zero_negative_and_garbage() {
+        for raw in ["0", "-5", "soon", ""] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from_str(raw).unwrap(),
+            );
+            assert_eq!(parse_retry_after_header(&headers), None, "raw={raw:?}");
+        }
+        assert_eq!(parse_retry_after_header(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn parse_retry_after_accepts_future_http_date_and_rejects_past() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(90);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::RETRY_AFTER,
+            HeaderValue::from_str(&future.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
+                .unwrap(),
+        );
+        let secs = parse_retry_after_header(&headers).expect("future date parses");
+        assert!((85..=90).contains(&secs), "≈90s, got {secs}");
+
+        let past = chrono::Utc::now() - chrono::Duration::seconds(90);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::RETRY_AFTER,
+            HeaderValue::from_str(&past.format("%a, %d %b %Y %H:%M:%S GMT").to_string()).unwrap(),
+        );
+        assert_eq!(parse_retry_after_header(&headers), None);
+    }
+
+    #[test]
+    fn cooldown_respects_upstream_retry_after_exactly() {
+        // 429/5xx 带 Retry-After：恰好冷却该秒数（base=cap、无宽限）
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(429, None, Some(300))),
+            (300, 300, 0)
+        );
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(503, None, Some(45))),
+            (45, 45, 0)
+        );
+        // 异常大的值被钳到 1 小时
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(429, None, Some(86400))),
+            (3600, 3600, 0)
+        );
+        // 401/403 不吃 Retry-After，保持认证轨道
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(401, None, Some(5))),
+            (600, 86400, 0)
+        );
+    }
+
+    #[test]
+    fn cooldown_routes_quota_429_to_quota_track() {
+        // 429 配额型：不再被瞬时限流的短轨道截胡
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(
+                429,
+                Some(r#"{"error":{"message":"You exceeded your monthly quota"}}"#),
+                None
+            )),
+            (300, 3600, 0)
+        );
+        // Retry-After 优先于配额关键词（上游显式时间最准）
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(429, Some("quota exceeded"), Some(120))),
+            (120, 120, 0)
+        );
+    }
+
+    #[test]
+    fn cooldown_gives_transient_429_grace_before_short_backoff() {
+        // 瞬时限流：3 次宽限 + 30s→10min 短退避（多重试少冷却）
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(429, Some("rate limit exceeded"), None)),
+            (30, 600, 3)
+        );
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(429, None, None)),
+            (30, 600, 3)
+        );
+    }
+
+    #[test]
+    fn cooldown_keeps_legacy_tracks_for_other_errors() {
+        assert_eq!(
+            key_failure_cooldown(&ProxyError::AuthError("bad".into())),
+            (600, 86400, 0)
+        );
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(500, None, None)),
+            (120, 1800, 0)
+        );
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(
+                402,
+                Some("insufficient balance"),
+                None
+            )),
+            (300, 3600, 0)
+        );
+        assert_eq!(
+            key_failure_cooldown(&ProxyError::Timeout("t".into())),
+            (60, 1800, 0)
+        );
+    }
 
     fn test_provider() -> Provider {
         Provider {
@@ -2452,6 +2654,7 @@ mod tests {
         let error = ProxyError::UpstreamError {
             status: 429,
             body: Some(r#"{"error":{"message":"rate limit exceeded"}}"#.to_string()),
+            retry_after: None,
         };
 
         let (code, message) = build_retryable_failure_log("PackyCode-response", 1, 1, &error);
@@ -2722,12 +2925,14 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        // 瞬时 429 在宽限期内：只标 Degraded、不冷却，key 仍留在轮转中
+        // （"429 多重试少冷却"——请求内已切到 key-2，下一请求亲和也偏向 key-2）
         assert_eq!(
             key_1_after.status,
-            crate::provider::ProviderKeyStatus::Cooldown
+            crate::provider::ProviderKeyStatus::Degraded
         );
         assert_eq!(key_1_after.consecutive_failures, 1);
-        assert!(key_1_after.cooldown_until.is_some());
+        assert!(key_1_after.cooldown_until.is_none());
         assert_eq!(
             key_2_after.status,
             crate::provider::ProviderKeyStatus::Active
@@ -3890,6 +4095,7 @@ mod tests {
             body: Some(
                 r#"{"error":{"message":"This model does not support image input"}}"#.to_string(),
             ),
+            retry_after: None,
         }
     }
     #[test]

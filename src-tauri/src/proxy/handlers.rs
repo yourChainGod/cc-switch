@@ -979,12 +979,16 @@ fn build_codex_proxy_error_response(
         ProxyError::Internal(format!("Failed to serialize proxy error: {e}"))
     })?;
 
-    axum::response::Response::builder()
-        .status(status)
-        .header(
-            axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("application/json"),
-        )
+    let mut builder = axum::response::Response::builder().status(status).header(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    // 与 ProxyError::into_response 对齐：把退避提示（上游 Retry-After /
+    // Key 池最早恢复时间）带给客户端
+    if let Some(secs) = error.retry_after_secs() {
+        builder = builder.header(axum::http::header::RETRY_AFTER, secs);
+    }
+    builder
         .body(axum::body::Body::from(body))
         .map_err(|e| {
             log::error!("[Codex] 构建代理错误响应失败: {e}");
@@ -999,7 +1003,7 @@ fn codex_proxy_error_json(
     error: &ProxyError,
 ) -> Value {
     let (mut body, upstream_status) = match error {
-        ProxyError::UpstreamError { status, body } => {
+        ProxyError::UpstreamError { status, body, .. } => {
             let parsed_body = body
                 .as_deref()
                 .map(|body| serde_json::from_str::<Value>(body).unwrap_or_else(|_| json!(body)));
@@ -1113,7 +1117,7 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => "cc_switch_timeout",
         ProxyError::NoAvailableProvider => "cc_switch_no_available_provider",
         ProxyError::AllProvidersCircuitOpen => "cc_switch_all_providers_circuit_open",
-        ProxyError::NoProviderKeysAvailable => "cc_switch_no_provider_keys_available",
+        ProxyError::NoProviderKeysAvailable { .. } => "cc_switch_no_provider_keys_available",
         ProxyError::NoProvidersConfigured => "cc_switch_no_providers_configured",
         ProxyError::MaxRetriesExceeded => "cc_switch_max_retries_exceeded",
         ProxyError::ProviderUnhealthy(_) => "cc_switch_provider_unhealthy",
@@ -1365,6 +1369,7 @@ mod tests {
                 r#"{"base_resp":{"status_code":2013,"status_msg":"upstream gateway failed"}}"#
                     .to_string(),
             ),
+            retry_after: None,
         };
         let body = codex_proxy_error_json("MiniMax", "abab6.5s", "/responses", &error);
 
@@ -1387,6 +1392,7 @@ mod tests {
                  <hr><center>nginx/1.29.6</center>\r\n</body>\r\n</html>"
                     .to_string(),
             ),
+            retry_after: None,
         };
         let body = codex_proxy_error_json("HCAI", "gpt-5.5", "/responses", &error);
 

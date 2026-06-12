@@ -38,7 +38,7 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
         ProxyError::AllProvidersCircuitOpen => 503,
 
         // Provider Key Pool 没有可用 Key：503 Service Unavailable
-        ProxyError::NoProviderKeysAvailable => 503,
+        ProxyError::NoProviderKeysAvailable { .. } => 503,
 
         // 未配置供应商：503 Service Unavailable
         ProxyError::NoProvidersConfigured => 503,
@@ -69,7 +69,7 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
 /// 将 ProxyError 转换为用户友好的错误消息
 pub fn get_error_message(error: &ProxyError) -> String {
     match error {
-        ProxyError::UpstreamError { status, body } => {
+        ProxyError::UpstreamError { status, body, .. } => {
             if let Some(body) = body {
                 format!("上游错误 ({status}): {body}")
             } else {
@@ -80,7 +80,7 @@ pub fn get_error_message(error: &ProxyError) -> String {
         ProxyError::ForwardFailed(msg) => format!("转发失败: {msg}"),
         ProxyError::NoAvailableProvider => "无可用 Provider".to_string(),
         ProxyError::AllProvidersCircuitOpen => "所有供应商已熔断，无可用渠道".to_string(),
-        ProxyError::NoProviderKeysAvailable => "Provider Key Pool 中没有可用 Key".to_string(),
+        ProxyError::NoProviderKeysAvailable { .. } => "Provider Key Pool 中没有可用 Key".to_string(),
         ProxyError::NoProvidersConfigured => "未配置供应商".to_string(),
         ProxyError::MaxRetriesExceeded => "所有 Provider 都失败，重试耗尽".to_string(),
         ProxyError::ProviderUnhealthy(msg) => format!("Provider 不健康: {msg}"),
@@ -99,6 +99,7 @@ mod tests {
         let error = ProxyError::UpstreamError {
             status: 401,
             body: Some("Unauthorized".to_string()),
+            retry_after: None,
         };
         assert_eq!(map_proxy_error_to_status(&error), 401);
     }
@@ -150,6 +151,7 @@ mod tests {
         let error = ProxyError::UpstreamError {
             status: 500,
             body: Some("Internal Server Error".to_string()),
+            retry_after: None,
         };
         let msg = get_error_message(&error);
         assert!(msg.contains("上游错误"));

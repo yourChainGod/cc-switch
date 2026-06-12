@@ -381,6 +381,7 @@ impl ProviderRouter {
         key_id: &str,
         cooldown_base_seconds: i64,
         cooldown_cap_seconds: i64,
+        grace_failures: i64,
     ) -> Result<(), AppError> {
         self.db.record_provider_key_failure(
             app_type,
@@ -388,6 +389,7 @@ impl ProviderRouter {
             key_id,
             cooldown_base_seconds,
             cooldown_cap_seconds,
+            grace_failures,
         )?;
         Ok(())
     }
@@ -844,7 +846,7 @@ mod tests {
                 },
             )
             .unwrap();
-        db.record_provider_key_failure("claude", "a", &key.id, 60, 60)
+        db.record_provider_key_failure("claude", "a", &key.id, 60, 60, 0)
             .unwrap();
 
         let router = ProviderRouter::new(db.clone());
@@ -899,7 +901,7 @@ mod tests {
                 },
             )
             .unwrap();
-        db.record_provider_key_failure("claude", "a", &key_a.id, 60, 60)
+        db.record_provider_key_failure("claude", "a", &key_a.id, 60, 60, 0)
             .unwrap();
 
         let key_b = db
