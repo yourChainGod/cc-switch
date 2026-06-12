@@ -1589,7 +1589,7 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     }
 }
 
-/// 主动从系统托盘移除托盘图标。
+/// 主动从系统托盘移除托盘图标（仅 Windows）。
 ///
 /// `std::process::exit` 会绕过 Tauri 运行时，触发不了 `TrayIcon::drop()`，
 /// 也就不会向 Windows Shell 发 `NIM_DELETE`。结果是进程退出后托盘里
@@ -1597,9 +1597,16 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
 ///
 /// 通过 `set_visible(false)` 走 `WM_USER_HIDE_TRAYICON` 消息路径，
 /// 触发 tray-icon 内部的 `remove_tray_icon` → `Shell_NotifyIconW(NIM_DELETE)`，
-/// 在进程结束前干净地把图标摘掉。其它平台 `set_visible(false)` 也是
-/// 正常的隐藏/移除语义，作为跨平台兜底也安全。
+/// 在进程结束前干净地把图标摘掉。
 fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
+    // 仅 Windows 需要显式移除（NIM_DELETE 残影问题）。
+    // macOS 上严禁在退出前移除托盘：removeStatusItem 会释放 tray-icon 的
+    // TrayTarget 视图，而 NSTrackingArea 不持有 owner；主线程事件循环在
+    // std::process::exit 前仍会派发 enter/exit 事件（移除图标本身就会因
+    // 相邻图标位移触发一批），命中已释放 owner → SIGABRT/SIGBUS
+    // （v3.16.1 退出/重启时的托盘崩溃）。进程退出时系统会自动回收
+    // 状态栏图标，无需手动移除；Linux 同理。
+    #[cfg(windows)]
     if let Some(tray) = app_handle.tray_by_id(tray::TRAY_ID) {
         if let Err(e) = tray.set_visible(false) {
             log::warn!("退出时移除托盘图标失败: {e}");
@@ -1607,6 +1614,8 @@ fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
             log::info!("已显式从系统托盘移除图标");
         }
     }
+    #[cfg(not(windows))]
+    let _ = app_handle;
 }
 
 // ============================================================

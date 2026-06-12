@@ -106,3 +106,9 @@ strip = "symbols"
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"
+
+# 本地打补丁的 tray-icon：修复 macOS 退出/重启时托盘 TrayTarget 被释放后
+# NSTrackingArea 仍向其派发 enter/exit 事件导致的 UAF 崩溃（SIGABRT/SIGBUS）。
+# 补丁内容见 vendor/tray-icon/src/platform_impl/macos/mod.rs 中 PATCH(cc-switch) 注释。
+[patch.crates-io]
+tray-icon = { path = "vendor/tray-icon" }
