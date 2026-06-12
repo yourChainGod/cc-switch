@@ -787,6 +787,22 @@ pub fn clear_provider_key_value(
     }
 }
 
+/// 供应商级自定义请求头规则。
+///
+/// 转发时按配置顺序应用到即将发往上游的请求头；认证头
+/// （authorization / x-api-key / x-goog-api-key）受黑名单保护，规则被忽略。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomHeaderRule {
+    /// 动作：override（覆盖整头）/ append（追加一条值）/
+    /// remove（value 为空删除整头；非空时按 CSV token 精确摘除）
+    pub action: String,
+    /// 头名称（大小写不敏感）
+    pub name: String,
+    /// 值；remove 动作下表示要摘除的单个 token，可为空
+    #[serde(default)]
+    pub value: String,
+}
+
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
@@ -870,6 +886,9 @@ pub struct ProviderMeta {
     /// `None` 表示旧数据/未知状态，`Some(false)` 表示明确仅存在于数据库中。
     #[serde(rename = "liveConfigManaged", skip_serializing_if = "Option::is_none")]
     pub live_config_managed: Option<bool>,
+    /// 自定义请求头规则（按序应用；认证头受黑名单保护，见 forwarder）
+    #[serde(default, rename = "headerRules", skip_serializing_if = "Vec::is_empty")]
+    pub header_rules: Vec<CustomHeaderRule>,
 }
 
 impl ProviderManager {

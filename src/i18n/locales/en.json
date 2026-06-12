@@ -1157,7 +1157,16 @@
     "pricingModelSourceInherit": "Inherit global default",
     "pricingModelSourceRequest": "Request model",
     "pricingModelSourceResponse": "Response model",
-    "pricingModelSourceHint": "Choose whether to match pricing by request model or response model"
+    "pricingModelSourceHint": "Choose whether to match pricing by request model or response model",
+    "headerRules": "Custom Request Headers",
+    "headerRulesDesc": "Rewrite request headers sent to this provider, in order. Auth headers (authorization / x-api-key / x-goog-api-key) are protected and cannot be modified.",
+    "headerRuleOverride": "Override",
+    "headerRuleAppend": "Append",
+    "headerRuleRemove": "Remove",
+    "headerRuleNamePlaceholder": "Header name, e.g. anthropic-beta",
+    "headerRuleValuePlaceholder": "Value",
+    "headerRuleRemoveValuePlaceholder": "Empty removes the header; a token removes it from the CSV list",
+    "headerRuleAdd": "Add rule"
   },
   "codexConfig": {
     "authJson": "auth.json (JSON) *",

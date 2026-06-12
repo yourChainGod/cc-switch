@@ -1,6 +1,15 @@
 import { useTranslation } from "react-i18next";
 import { useState, useEffect } from "react";
-import { ChevronDown, ChevronRight, FlaskConical, Coins } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  FlaskConical,
+  Coins,
+  ListPlus,
+  Plus,
+  Trash2,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -12,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import type { ProviderTestConfig } from "@/types";
+import type { CustomHeaderRule, ProviderTestConfig } from "@/types";
 
 export type PricingModelSourceOption = "inherit" | "request" | "response";
 
@@ -25,15 +34,19 @@ interface ProviderPricingConfig {
 interface ProviderAdvancedConfigProps {
   testConfig: ProviderTestConfig;
   pricingConfig: ProviderPricingConfig;
+  headerRules: CustomHeaderRule[];
   onTestConfigChange: (config: ProviderTestConfig) => void;
   onPricingConfigChange: (config: ProviderPricingConfig) => void;
+  onHeaderRulesChange: (rules: CustomHeaderRule[]) => void;
 }
 
 export function ProviderAdvancedConfig({
   testConfig,
   pricingConfig,
+  headerRules,
   onTestConfigChange,
   onPricingConfigChange,
+  onHeaderRulesChange,
 }: ProviderAdvancedConfigProps) {
   const { t } = useTranslation();
   const testConfigPanelId = "provider-test-config-panel";
@@ -42,6 +55,16 @@ export function ProviderAdvancedConfig({
   const [isPricingConfigOpen, setIsPricingConfigOpen] = useState(
     pricingConfig.enabled,
   );
+  const headerRulesPanelId = "provider-header-rules-panel";
+  const [isHeaderRulesOpen, setIsHeaderRulesOpen] = useState(
+    headerRules.length > 0,
+  );
+
+  const updateHeaderRule = (index: number, patch: Partial<CustomHeaderRule>) => {
+    onHeaderRulesChange(
+      headerRules.map((rule, i) => (i === index ? { ...rule, ...patch } : rule)),
+    );
+  };
 
   useEffect(() => {
     setIsTestConfigOpen(testConfig.enabled);
@@ -359,6 +382,144 @@ export function ProviderAdvancedConfig({
                 </p>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-border/50 bg-muted/20">
+        <button
+          type="button"
+          className="flex w-full items-center gap-3 p-4 text-left transition-colors hover:bg-muted/30"
+          aria-expanded={isHeaderRulesOpen}
+          aria-controls={headerRulesPanelId}
+          onClick={() => setIsHeaderRulesOpen(!isHeaderRulesOpen)}
+        >
+          <ListPlus className="h-4 w-4 text-muted-foreground" />
+          <span className="font-medium">
+            {t("providerAdvanced.headerRules", {
+              defaultValue: "自定义请求头规则",
+            })}
+          </span>
+          {headerRules.length > 0 && (
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+              {headerRules.length}
+            </span>
+          )}
+          {isHeaderRulesOpen ? (
+            <ChevronDown className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+        </button>
+        <div
+          id={headerRulesPanelId}
+          className={cn(
+            "overflow-hidden transition-all duration-200",
+            isHeaderRulesOpen ? "max-h-[600px] opacity-100" : "max-h-0 opacity-0",
+          )}
+        >
+          <div className="border-t border-border/50 p-4 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {t("providerAdvanced.headerRulesDesc", {
+                defaultValue:
+                  "按顺序改写发往该供应商的请求头。认证头（authorization / x-api-key / x-goog-api-key）受保护，规则不会生效。",
+              })}
+            </p>
+            {headerRules.map((rule, index) => (
+              <div
+                key={index}
+                className="grid grid-cols-[110px_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2"
+              >
+                <Select
+                  value={rule.action}
+                  onValueChange={(value) =>
+                    updateHeaderRule(index, {
+                      action: value as CustomHeaderRule["action"],
+                    })
+                  }
+                >
+                  <SelectTrigger aria-label="action">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="override">
+                      {t("providerAdvanced.headerRuleOverride", {
+                        defaultValue: "覆盖",
+                      })}
+                    </SelectItem>
+                    <SelectItem value="append">
+                      {t("providerAdvanced.headerRuleAppend", {
+                        defaultValue: "追加",
+                      })}
+                    </SelectItem>
+                    <SelectItem value="remove">
+                      {t("providerAdvanced.headerRuleRemove", {
+                        defaultValue: "删除",
+                      })}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input
+                  value={rule.name}
+                  onChange={(e) =>
+                    updateHeaderRule(index, { name: e.target.value })
+                  }
+                  placeholder={t("providerAdvanced.headerRuleNamePlaceholder", {
+                    defaultValue: "Header 名称，如 anthropic-beta",
+                  })}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <Input
+                  value={rule.value}
+                  onChange={(e) =>
+                    updateHeaderRule(index, { value: e.target.value })
+                  }
+                  placeholder={
+                    rule.action === "remove"
+                      ? t("providerAdvanced.headerRuleRemoveValuePlaceholder", {
+                          defaultValue: "留空删整头；填 token 按 CSV 摘除",
+                        })
+                      : t("providerAdvanced.headerRuleValuePlaceholder", {
+                          defaultValue: "值",
+                        })
+                  }
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="text-muted-foreground hover:text-destructive"
+                  aria-label={t("common.delete", { defaultValue: "删除" })}
+                  onClick={() =>
+                    onHeaderRulesChange(
+                      headerRules.filter((_, i) => i !== index),
+                    )
+                  }
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            ))}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                onHeaderRulesChange([
+                  ...headerRules,
+                  { action: "override", name: "", value: "" },
+                ]);
+                setIsHeaderRulesOpen(true);
+              }}
+            >
+              <Plus className="mr-1 h-4 w-4" />
+              {t("providerAdvanced.headerRuleAdd", {
+                defaultValue: "添加规则",
+              })}
+            </Button>
           </div>
         </div>
       </div>

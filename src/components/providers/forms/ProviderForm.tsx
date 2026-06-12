@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
 import type {
+  CustomHeaderRule,
   ProviderCategory,
   ProviderMeta,
   ProviderTestConfig,
@@ -307,6 +308,9 @@ function ProviderFormFull({
   const [testConfig, setTestConfig] = useState<ProviderTestConfig>(
     () => initialData?.meta?.testConfig ?? { enabled: false },
   );
+  const [headerRules, setHeaderRules] = useState<CustomHeaderRule[]>(
+    () => initialData?.meta?.headerRules ?? [],
+  );
   const [pricingConfig, setPricingConfig] = useState<{
     enabled: boolean;
     costMultiplier?: string;
@@ -343,6 +347,7 @@ function ProviderFormFull({
       supportsFullUrl ? (initialData?.meta?.isFullUrl ?? false) : false,
     );
     setTestConfig(initialData?.meta?.testConfig ?? { enabled: false });
+    setHeaderRules(initialData?.meta?.headerRules ?? []);
     setPricingConfig({
       enabled:
         initialData?.meta?.costMultiplier !== undefined ||
@@ -1332,6 +1337,17 @@ function ProviderFormFull({
         supportsFullUrl && category !== "official" && localIsFullUrl
           ? true
           : undefined,
+      headerRules: (() => {
+        // 丢弃名称为空的草稿行；全部为空则从 meta 中移除该字段
+        const cleaned = headerRules
+          .map((rule) => ({
+            action: rule.action,
+            name: rule.name.trim(),
+            value: rule.value.trim(),
+          }))
+          .filter((rule) => rule.name !== "");
+        return cleaned.length > 0 ? cleaned : undefined;
+      })(),
     };
 
     payload.meta = nextMeta;
@@ -2212,8 +2228,10 @@ function ProviderFormFull({
               <ProviderAdvancedConfig
                 testConfig={testConfig}
                 pricingConfig={pricingConfig}
+                headerRules={headerRules}
                 onTestConfigChange={setTestConfig}
                 onPricingConfigChange={setPricingConfig}
+                onHeaderRulesChange={setHeaderRules}
               />
             )}
 

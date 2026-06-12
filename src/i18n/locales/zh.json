@@ -1157,7 +1157,16 @@
     "pricingModelSourceInherit": "继承全局默认",
     "pricingModelSourceRequest": "请求模型",
     "pricingModelSourceResponse": "返回模型",
-    "pricingModelSourceHint": "选择按请求模型还是返回模型进行定价匹配"
+    "pricingModelSourceHint": "选择按请求模型还是返回模型进行定价匹配",
+    "headerRules": "自定义请求头规则",
+    "headerRulesDesc": "按顺序改写发往该供应商的请求头。认证头（authorization / x-api-key / x-goog-api-key）受保护，规则不会生效。",
+    "headerRuleOverride": "覆盖",
+    "headerRuleAppend": "追加",
+    "headerRuleRemove": "删除",
+    "headerRuleNamePlaceholder": "Header 名称，如 anthropic-beta",
+    "headerRuleValuePlaceholder": "值",
+    "headerRuleRemoveValuePlaceholder": "留空删整头；填 token 按 CSV 摘除",
+    "headerRuleAdd": "添加规则"
   },
   "codexConfig": {
     "authJson": "auth.json (JSON) *",

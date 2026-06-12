@@ -207,6 +207,17 @@ export interface CodexChatReasoning {
   outputFormat?: CodexChatReasoningOutputFormat;
 }
 
+// 供应商级自定义请求头规则（认证头受后端黑名单保护）
+export interface CustomHeaderRule {
+  // override：覆盖整头；append：追加一条值；
+  // remove：value 为空删除整头，非空时按 CSV token 精确摘除
+  action: "override" | "append" | "remove";
+  // 头名称（大小写不敏感）
+  name: string;
+  // 值；remove 动作下表示要摘除的单个 token，可为空
+  value: string;
+}
+
 // 供应商元数据（字段名与后端一致，保持 snake_case）
 export interface ProviderMeta {
   // 自定义端点：以 URL 为键，值为端点信息
@@ -253,6 +264,8 @@ export interface ProviderMeta {
   promptCacheKey?: string;
   // Codex Responses -> Chat Completions reasoning capability metadata
   codexChatReasoning?: CodexChatReasoning;
+  // 自定义请求头规则（按序应用到发往上游的请求头）
+  headerRules?: CustomHeaderRule[];
 }
 
 // Skill 同步方式

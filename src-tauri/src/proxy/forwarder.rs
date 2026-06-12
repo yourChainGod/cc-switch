@@ -205,6 +205,63 @@ impl RequestForwarder {
         }
     }
 
+    /// 同通道"改体重试"成功后的统一记账：记录通道成功、刷新当前供应商、
+    /// 维护成功率与故障转移切换通知，组装最终 ForwardResult。
+    ///（媒体降级重试 / anyrouter Codex 兼容重试共用）
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize_same_provider_retry_success(
+        &self,
+        response: ProxyResponse,
+        claude_api_format: Option<String>,
+        provider: &Provider,
+        attempt_key_id: Option<String>,
+        key_id: Option<&str>,
+        app_type_str: &str,
+        used_half_open_permit: bool,
+    ) -> ForwardResult {
+        self.record_success_result(&provider.id, key_id, app_type_str, used_half_open_permit)
+            .await;
+
+        {
+            let mut current_providers = self.current_providers.write().await;
+            current_providers.insert(
+                app_type_str.to_string(),
+                (provider.id.clone(), provider.name.clone()),
+            );
+        }
+
+        {
+            let mut status = self.status.write().await;
+            status.success_requests += 1;
+            status.last_error = None;
+            let should_switch = self.current_provider_id_at_start.as_str() != provider.id.as_str();
+            if should_switch {
+                status.failover_count += 1;
+                let fm = self.failover_manager.clone();
+                let ah = self.app_handle.clone();
+                let pid = provider.id.clone();
+                let pname = provider.name.clone();
+                let at = app_type_str.to_string();
+
+                tokio::spawn(async move {
+                    let _ = fm.try_switch(ah.as_ref(), &at, &pid, &pname).await;
+                });
+            }
+            if status.total_requests > 0 {
+                status.success_rate =
+                    (status.success_requests as f32 / status.total_requests as f32) * 100.0;
+            }
+        }
+
+        ForwardResult {
+            response,
+            provider: provider.clone(),
+            key_id: attempt_key_id,
+            claude_api_format,
+            connection_guard: None,
+        }
+    }
+
     async fn record_success_result(
         &self,
         provider_id: &str,
@@ -532,6 +589,7 @@ impl RequestForwarder {
             let mut rectifier_retried = false;
             let mut budget_rectifier_retried = false;
             let mut media_rectifier_retried = false;
+            let mut anyrouter_codex_retried = false;
 
             // 上限检查：尊重用户在 AppProxyConfig.max_retries 上配置的「重试次数」。
             // 放在熔断器 allow 检查之前，避免在已经超限时还占用 HalfOpen 探测名额。
@@ -721,58 +779,17 @@ impl RequestForwarder {
                                     log::info!(
                                         "[{app_type_str}] [Media] Unsupported-image retry succeeded"
                                     );
-                                    self.record_success_result(
-                                        &provider.id,
-                                        key_id,
-                                        app_type_str,
-                                        used_half_open_permit,
-                                    )
-                                    .await;
-
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
-
-                                    {
-                                        let mut status = self.status.write().await;
-                                        status.success_requests += 1;
-                                        status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
-                                        if should_switch {
-                                            status.failover_count += 1;
-                                            let fm = self.failover_manager.clone();
-                                            let ah = self.app_handle.clone();
-                                            let pid = provider.id.clone();
-                                            let pname = provider.name.clone();
-                                            let at = app_type_str.to_string();
-
-                                            tokio::spawn(async move {
-                                                let _ = fm
-                                                    .try_switch(ah.as_ref(), &at, &pid, &pname)
-                                                    .await;
-                                            });
-                                        }
-                                        if status.total_requests > 0 {
-                                            status.success_rate = (status.success_requests as f32
-                                                / status.total_requests as f32)
-                                                * 100.0;
-                                        }
-                                    }
-
-                                    return Ok(ForwardResult {
-                                        response,
-                                        provider: provider.clone(),
-                                        key_id: attempt.key_id.clone(),
-                                        claude_api_format,
-                                        connection_guard: None,
-                                    });
+                                    return Ok(self
+                                        .finalize_same_provider_retry_success(
+                                            response,
+                                            claude_api_format,
+                                            provider,
+                                            attempt.key_id.clone(),
+                                            key_id,
+                                            app_type_str,
+                                            used_half_open_permit,
+                                        )
+                                        .await);
                                 }
                                 Err(retry_err) => {
                                     log::warn!(
@@ -786,6 +803,82 @@ impl RequestForwarder {
                                             app_type_str,
                                             used_half_open_permit,
                                             "media 降级",
+                                            &mut last_error,
+                                            &mut last_provider,
+                                        )
+                                        .await
+                                    {
+                                        return Err(err);
+                                    }
+                                    if key_id.is_none() {
+                                        provider_blocked_by_failure.insert(provider.id.clone());
+                                    } else if remaining_same_provider_key {
+                                        pending_key_retry_provider_id = Some(provider.id.clone());
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    // anyrouter Codex 兼容重试：上游 400 invalid_responses_request 表示
+                    // 该端点不接受 OpenAI 的 encrypted reasoning content / tool_search_*，
+                    // 剥掉这些字段后同通道重试一次（ccLoad 同款适配）
+                    if !anyrouter_codex_retried
+                        && adapter.name() == "Codex"
+                        && is_invalid_responses_request_error(&e)
+                        && is_anyrouter_channel(
+                            &provider.name,
+                            &adapter.extract_base_url(provider).unwrap_or_default(),
+                        )
+                    {
+                        if let Some(stripped_body) =
+                            codex_body_without_encrypted_and_tool_search(&provider_body)
+                        {
+                            let _ = std::mem::replace(&mut anyrouter_codex_retried, true);
+                            log::info!(
+                                "[{app_type_str}] [anyrouter] 上游拒绝 Responses 请求（invalid_responses_request），剥除 encrypted_content/tool_search 后重试: provider={}",
+                                provider.name
+                            );
+                            match self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &stripped_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                )
+                                .await
+                            {
+                                Ok((response, claude_api_format)) => {
+                                    log::info!("[{app_type_str}] [anyrouter] Codex 兼容重试成功");
+                                    return Ok(self
+                                        .finalize_same_provider_retry_success(
+                                            response,
+                                            claude_api_format,
+                                            provider,
+                                            attempt.key_id.clone(),
+                                            key_id,
+                                            app_type_str,
+                                            used_half_open_permit,
+                                        )
+                                        .await);
+                                }
+                                Err(retry_err) => {
+                                    log::warn!(
+                                        "[{app_type_str}] [anyrouter] Codex 兼容重试仍失败: {retry_err}"
+                                    );
+                                    if let Some(err) = self
+                                        .handle_rectifier_retry_failure(
+                                            retry_err,
+                                            provider,
+                                            key_id,
+                                            app_type_str,
+                                            used_half_open_permit,
+                                            "anyrouter Codex 兼容",
                                             &mut last_error,
                                             &mut last_provider,
                                         )
@@ -1341,6 +1434,10 @@ impl RequestForwarder {
         // 使用适配器提取 base_url
         let base_url = adapter.extract_base_url(provider)?;
 
+        // anyrouter 渠道检测：名称含 anyrouter，或 base_url 命中两个已知域名
+        // （anyrouter.top / a-ocnfniawgw.cn-shanghai.fcapp.run）任一
+        let is_anyrouter = is_anyrouter_channel(&provider.name, &base_url);
+
         let is_full_url = provider
             .meta
             .as_ref()
@@ -1377,6 +1474,19 @@ impl RequestForwarder {
                     api_format,
                 );
                 self.apply_media_prevention(&mut mapped_body, provider);
+
+                // anyrouter：/v1/messages 未声明 thinking 时注入 adaptive
+                //（上游要求显式 thinking.type=adaptive，缺失时行为不可预期）
+                if is_anyrouter
+                    && api_format == "anthropic"
+                    && endpoint.split('?').next().unwrap_or(endpoint) == "/v1/messages"
+                    && inject_adaptive_thinking_if_missing(&mut mapped_body)
+                {
+                    log::info!(
+                        "[Claude] [anyrouter] 注入 thinking.type=adaptive: provider={}",
+                        provider.name
+                    );
+                }
             }
         }
         let needs_transform = match resolved_claude_api_format.as_deref() {
@@ -1510,6 +1620,16 @@ impl RequestForwarder {
             None
         };
 
+        // anyrouter：确保 anthropic-beta 携带 context-1m flag（已有则不重复）
+        let anthropic_beta_value = if should_send_anthropic_headers && is_anyrouter {
+            Some(merge_anthropic_beta_token(
+                anthropic_beta_value,
+                ANYROUTER_CONTEXT_1M_BETA,
+            ))
+        } else {
+            anthropic_beta_value
+        };
+
         // ============================================================
         // 构建有序 HeaderMap — 内联替换，保持客户端原始顺序
         // ============================================================
@@ -1518,9 +1638,16 @@ impl RequestForwarder {
         let mut saw_accept_encoding = false;
         let mut saw_anthropic_beta = false;
         let mut saw_anthropic_version = false;
+        // RFC 7230：Connection 头点名的字段也是 hop-by-hop，须一并摘除
+        let connection_tokens = connection_declared_header_tokens(headers);
 
         for (key, value) in headers {
             let key_str = key.as_str();
+
+            // --- hop-by-hop（含 Connection 点名字段）— 无条件跳过 ---
+            if is_hop_by_hop_request_header(key_str, &connection_tokens) {
+                continue;
+            }
 
             // --- host — 原位替换为上游 host（保持客户端原始位置） ---
             if key_str.eq_ignore_ascii_case("host") {
@@ -1618,6 +1745,15 @@ impl RequestForwarder {
                 continue;
             }
 
+            // --- anthropic-dangerous-direct-browser-access — Anthropic 专属头，
+            //     非 Anthropic 格式上游一律丢弃（与 version/beta 同等对待） ---
+            if key_str.eq_ignore_ascii_case("anthropic-dangerous-direct-browser-access") {
+                if should_send_anthropic_headers {
+                    ordered_headers.append(key.clone(), value.clone());
+                }
+                continue;
+            }
+
             // --- 默认：透传 ---
             ordered_headers.append(key.clone(), value.clone());
         }
@@ -1652,6 +1788,13 @@ impl RequestForwarder {
                 "anthropic-version",
                 http::HeaderValue::from_static("2023-06-01"),
             );
+        }
+
+        // 供应商级自定义请求头规则：最后应用，可改写除认证头外的任意头
+        if let Some(meta) = provider.meta.as_ref() {
+            if !meta.header_rules.is_empty() {
+                apply_provider_header_rules(&mut ordered_headers, &meta.header_rules);
+            }
         }
 
         // 序列化请求体。GET/HEAD 是 idempotent/safe 方法，按 HTTP 语义不应携带 body；
@@ -2174,6 +2317,227 @@ fn is_streaming_request(endpoint: &str, body: &Value, headers: &axum::http::Head
         .and_then(|value| value.to_str().ok())
         .map(|accept| accept.contains("text/event-stream"))
         .unwrap_or(false)
+}
+
+/// RFC 7230 hop-by-hop 请求头：代理必须摘除、不得转发到上游
+/// （content-length / transfer-encoding 在主跳过清单单独处理；响应侧见 response_processor）。
+const HOP_BY_HOP_REQUEST_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "trailers",
+    "upgrade",
+];
+
+/// 收集客户端 `Connection` 头点名的动态 hop-by-hop 字段（RFC 7230 §6.1）。
+fn connection_declared_header_tokens(headers: &axum::http::HeaderMap) -> Vec<String> {
+    headers
+        .get_all(axum::http::header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn is_hop_by_hop_request_header(name: &str, connection_tokens: &[String]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    HOP_BY_HOP_REQUEST_HEADERS.contains(&lower.as_str()) || connection_tokens.contains(&lower)
+}
+
+/// 自定义头规则禁止触碰的认证头（由 adapter 统一注入，规则改写会破坏鉴权）。
+const HEADER_RULE_AUTH_BLACKLIST: &[&str] = &["authorization", "x-api-key", "x-goog-api-key"];
+
+/// 按配置顺序应用供应商级自定义请求头规则（ccLoad 风格）。
+///
+/// - override：覆盖整头；append：追加一条值
+/// - remove：value 为空删除整头；非空时按 CSV token 精确摘除
+///   （典型用例：从 anthropic-beta 里只摘掉某一个 flag、保留其余）
+/// - 认证头黑名单内的规则静默忽略并告警
+fn apply_provider_header_rules(
+    headers: &mut http::HeaderMap,
+    rules: &[crate::provider::CustomHeaderRule],
+) {
+    for (idx, rule) in rules.iter().enumerate() {
+        let name = rule.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        if HEADER_RULE_AUTH_BLACKLIST.contains(&lower.as_str()) {
+            log::warn!("[HeaderRules] 规则 #{idx} 试图改写认证头 {name}，已忽略");
+            continue;
+        }
+        let Ok(header_name) = http::HeaderName::from_bytes(lower.as_bytes()) else {
+            log::warn!("[HeaderRules] 规则 #{idx} 头名称非法: {name:?}，已忽略");
+            continue;
+        };
+        match rule.action.as_str() {
+            "override" => {
+                if let Ok(value) = http::HeaderValue::from_str(rule.value.trim()) {
+                    headers.insert(header_name, value);
+                } else {
+                    log::warn!("[HeaderRules] 规则 #{idx} 值非法，已忽略");
+                }
+            }
+            "append" => {
+                if let Ok(value) = http::HeaderValue::from_str(rule.value.trim()) {
+                    headers.append(header_name, value);
+                } else {
+                    log::warn!("[HeaderRules] 规则 #{idx} 值非法，已忽略");
+                }
+            }
+            "remove" => {
+                let target = rule.value.trim();
+                if target.is_empty() {
+                    headers.remove(&header_name);
+                } else {
+                    remove_header_csv_token(headers, &header_name, target);
+                }
+            }
+            other => {
+                log::warn!("[HeaderRules] 规则 #{idx} 动作未知: {other:?}，已忽略");
+            }
+        }
+    }
+}
+
+/// 从（可能多条的）头值里按 CSV token 精确摘除 `target`；
+/// 某条值的 token 摘空则丢弃该条，全部摘空则整头删除。
+fn remove_header_csv_token(headers: &mut http::HeaderMap, name: &http::HeaderName, target: &str) {
+    let values: Vec<String> = headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(ToString::to_string))
+        .collect();
+    if values.is_empty() {
+        return;
+    }
+    let mut kept_values = Vec::with_capacity(values.len());
+    for value in values {
+        let kept: Vec<&str> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty() && *token != target)
+            .collect();
+        if !kept.is_empty() {
+            kept_values.push(kept.join(", "));
+        }
+    }
+    headers.remove(name);
+    for value in kept_values {
+        if let Ok(hv) = http::HeaderValue::from_str(&value) {
+            headers.append(name, hv);
+        }
+    }
+}
+
+/// anyrouter 的两个已知接入域名：主站 + 阿里云函数计算备用端点。
+/// 渠道名含 "anyrouter" 或 base_url 命中任一域名（含子域）即按 anyrouter 适配。
+const ANYROUTER_KNOWN_HOSTS: &[&str] = &["anyrouter.top", "a-ocnfniawgw.cn-shanghai.fcapp.run"];
+
+/// anyrouter 要求显式携带的 1M 上下文 beta flag（ccLoad 同款适配）。
+const ANYROUTER_CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
+
+fn is_anyrouter_channel(provider_name: &str, base_url: &str) -> bool {
+    if provider_name.to_ascii_lowercase().contains("anyrouter") {
+        return true;
+    }
+    let Some(host) = base_url
+        .parse::<http::Uri>()
+        .ok()
+        .and_then(|uri| uri.host().map(|h| h.to_ascii_lowercase()))
+    else {
+        return false;
+    };
+    ANYROUTER_KNOWN_HOSTS
+        .iter()
+        .any(|known| host == *known || host.ends_with(&format!(".{known}")))
+}
+
+/// 把 `token` 并入 CSV 形式的 anthropic-beta 值（已存在则原样返回）。
+fn merge_anthropic_beta_token(existing: Option<String>, token: &str) -> String {
+    match existing {
+        Some(value) if value.split(',').any(|t| t.trim() == token) => value,
+        Some(value) if !value.trim().is_empty() => format!("{value},{token}"),
+        _ => token.to_string(),
+    }
+}
+
+/// anyrouter /v1/messages：body 未声明 thinking 时注入 adaptive
+/// （anyrouter 上游要求显式 thinking.type=adaptive 才启用自适应思考）。
+fn inject_adaptive_thinking_if_missing(body: &mut Value) -> bool {
+    let Some(obj) = body.as_object_mut() else {
+        return false;
+    };
+    if obj.contains_key("thinking") {
+        return false;
+    }
+    obj.insert(
+        "thinking".to_string(),
+        serde_json::json!({"type": "adaptive"}),
+    );
+    true
+}
+
+/// anyrouter Codex 端点的 400 invalid_responses_request：
+/// 该上游不接受 OpenAI 的 encrypted reasoning content 与 tool_search_* 输入项。
+fn is_invalid_responses_request_error(error: &ProxyError) -> bool {
+    let ProxyError::UpstreamError {
+        status: 400,
+        body: Some(body),
+        ..
+    } = error
+    else {
+        return false;
+    };
+    body.to_ascii_lowercase().contains("invalid_responses_request")
+}
+
+/// 剥掉 Codex 请求体里所有 encrypted_content 字段（递归）与顶层 input[]
+/// 中 type 前缀为 tool_search_ 的项；没有任何改动时返回 None（不值得重试）。
+fn codex_body_without_encrypted_and_tool_search(body: &Value) -> Option<Value> {
+    let mut cloned = body.clone();
+    let mut removed = remove_encrypted_content_fields(&mut cloned);
+    if let Some(input) = cloned.get_mut("input").and_then(Value::as_array_mut) {
+        let before = input.len();
+        input.retain(|item| {
+            !item
+                .get("type")
+                .and_then(Value::as_str)
+                .map(|t| t.starts_with("tool_search_"))
+                .unwrap_or(false)
+        });
+        if input.len() != before {
+            removed = true;
+        }
+    }
+    removed.then_some(cloned)
+}
+
+fn remove_encrypted_content_fields(value: &mut Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let mut removed = map.remove("encrypted_content").is_some();
+            for child in map.values_mut() {
+                removed |= remove_encrypted_content_fields(child);
+            }
+            removed
+        }
+        Value::Array(items) => {
+            let mut removed = false;
+            for item in items {
+                removed |= remove_encrypted_content_fields(item);
+            }
+            removed
+        }
+        _ => false,
+    }
 }
 
 fn is_key_scoped_error(error: &ProxyError) -> bool {
@@ -4217,5 +4581,434 @@ mod tests {
         });
         let body = body_with_image("any-model");
         assert!(fwd.media_retry_should_trigger("Claude", false, &body, &image_unsupported_error()));
+    }
+    // ====================================================================
+    // hop-by-hop / 自定义头规则 / anyrouter 适配
+    // ====================================================================
+
+    #[test]
+    fn hop_by_hop_request_headers_are_detected_including_connection_tokens() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONNECTION,
+            HeaderValue::from_static("keep-alive, X-Secret-Hop"),
+        );
+        let tokens = connection_declared_header_tokens(&headers);
+        assert!(tokens.contains(&"x-secret-hop".to_string()));
+
+        for name in [
+            "Connection",
+            "keep-alive",
+            "TE",
+            "Trailer",
+            "Upgrade",
+            "Proxy-Authorization",
+            "x-secret-hop",
+        ] {
+            assert!(
+                is_hop_by_hop_request_header(name, &tokens),
+                "{name} should be hop-by-hop"
+            );
+        }
+        assert!(!is_hop_by_hop_request_header("anthropic-beta", &tokens));
+        assert!(!is_hop_by_hop_request_header("x-keep-me", &tokens));
+    }
+
+    fn header_rule(action: &str, name: &str, value: &str) -> crate::provider::CustomHeaderRule {
+        crate::provider::CustomHeaderRule {
+            action: action.to_string(),
+            name: name.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn provider_header_rules_apply_override_append_remove() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-old", HeaderValue::from_static("v1"));
+        headers.insert("x-drop", HeaderValue::from_static("bye"));
+
+        apply_provider_header_rules(
+            &mut headers,
+            &[
+                header_rule("override", "x-old", "v2"),
+                header_rule("append", "x-multi", "a"),
+                header_rule("append", "x-multi", "b"),
+                header_rule("remove", "x-drop", ""),
+            ],
+        );
+
+        assert_eq!(headers.get("x-old").unwrap(), "v2");
+        let multi: Vec<_> = headers.get_all("x-multi").iter().collect();
+        assert_eq!(multi.len(), 2);
+        assert!(headers.get("x-drop").is_none());
+    }
+
+    #[test]
+    fn provider_header_rules_remove_single_csv_token() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("claude-code-20250219,context-1m-2025-08-07"),
+        );
+
+        apply_provider_header_rules(
+            &mut headers,
+            &[header_rule("remove", "anthropic-beta", "context-1m-2025-08-07")],
+        );
+
+        assert_eq!(
+            headers.get("anthropic-beta").unwrap(),
+            "claude-code-20250219"
+        );
+
+        // 摘空所有 token 后整头删除
+        apply_provider_header_rules(
+            &mut headers,
+            &[header_rule("remove", "anthropic-beta", "claude-code-20250219")],
+        );
+        assert!(headers.get("anthropic-beta").is_none());
+    }
+
+    #[test]
+    fn provider_header_rules_never_touch_auth_headers() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer real"));
+        headers.insert("x-api-key", HeaderValue::from_static("sk-real"));
+
+        apply_provider_header_rules(
+            &mut headers,
+            &[
+                header_rule("override", "Authorization", "Bearer fake"),
+                header_rule("remove", "X-Api-Key", ""),
+                header_rule("override", "x-goog-api-key", "evil"),
+                header_rule("unknown-action", "x-any", "v"),
+                header_rule("override", "bad name\n", "v"),
+            ],
+        );
+
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer real");
+        assert_eq!(headers.get("x-api-key").unwrap(), "sk-real");
+        assert!(headers.get("x-goog-api-key").is_none());
+    }
+
+    #[test]
+    fn anyrouter_channel_is_detected_by_name_or_known_hosts() {
+        // 名称命中（不分大小写）
+        assert!(is_anyrouter_channel("AnyRouter 主力", "https://example.com"));
+        // 两个已知域名都命中（与渠道名无关）
+        assert!(is_anyrouter_channel("中转A", "https://anyrouter.top"));
+        assert!(is_anyrouter_channel(
+            "备用",
+            "https://a-ocnfniawgw.cn-shanghai.fcapp.run/api"
+        ));
+        // 子域也命中
+        assert!(is_anyrouter_channel("x", "https://api.anyrouter.top/v1"));
+        // 其他域名 + 无关名称不命中
+        assert!(!is_anyrouter_channel("packy", "https://api.packycode.com"));
+        // 相似但不同的域名不命中（不能用 contains 误匹配）
+        assert!(!is_anyrouter_channel("x", "https://fakeanyrouter.top.evil.com"));
+    }
+
+    #[test]
+    fn anthropic_beta_token_merge_is_idempotent() {
+        assert_eq!(
+            merge_anthropic_beta_token(None, ANYROUTER_CONTEXT_1M_BETA),
+            "context-1m-2025-08-07"
+        );
+        assert_eq!(
+            merge_anthropic_beta_token(
+                Some("claude-code-20250219".to_string()),
+                ANYROUTER_CONTEXT_1M_BETA
+            ),
+            "claude-code-20250219,context-1m-2025-08-07"
+        );
+        // 已含该 token（带空格）不重复追加
+        assert_eq!(
+            merge_anthropic_beta_token(
+                Some("a, context-1m-2025-08-07".to_string()),
+                ANYROUTER_CONTEXT_1M_BETA
+            ),
+            "a, context-1m-2025-08-07"
+        );
+    }
+
+    #[test]
+    fn adaptive_thinking_injection_respects_existing_value() {
+        let mut body = json!({"model": "claude-sonnet-4-6", "messages": []});
+        assert!(inject_adaptive_thinking_if_missing(&mut body));
+        assert_eq!(body["thinking"]["type"], "adaptive");
+
+        let mut with_thinking =
+            json!({"thinking": {"type": "enabled", "budget_tokens": 2048}});
+        assert!(!inject_adaptive_thinking_if_missing(&mut with_thinking));
+        assert_eq!(with_thinking["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn invalid_responses_request_error_is_matched() {
+        assert!(is_invalid_responses_request_error(&ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"code":"invalid_responses_request","message":"bad"}}"#.to_string()
+            ),
+            retry_after: None,
+        }));
+        assert!(is_invalid_responses_request_error(&ProxyError::UpstreamError {
+            status: 400,
+            body: Some(r#"{"error":{"message":"Invalid_Responses_Request: nope"}}"#.to_string()),
+            retry_after: None,
+        }));
+        // 非 400 / 无关错误体不命中
+        assert!(!is_invalid_responses_request_error(&ProxyError::UpstreamError {
+            status: 500,
+            body: Some("invalid_responses_request".to_string()),
+            retry_after: None,
+        }));
+        assert!(!is_invalid_responses_request_error(&ProxyError::UpstreamError {
+            status: 400,
+            body: Some("other error".to_string()),
+            retry_after: None,
+        }));
+    }
+
+    #[test]
+    fn codex_body_strip_removes_encrypted_and_tool_search() {
+        let body = json!({
+            "model": "gpt-5",
+            "input": [
+                {"type": "message", "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "tool_search_call", "queries": ["x"]},
+                {"type": "reasoning", "encrypted_content": "ZZZ", "summary": []}
+            ],
+            "nested": {"deep": [{"encrypted_content": "AAA"}]}
+        });
+        let stripped = codex_body_without_encrypted_and_tool_search(&body)
+            .expect("should strip something");
+        let dumped = serde_json::to_string(&stripped).unwrap();
+        assert!(!dumped.contains("encrypted_content"));
+        assert!(!dumped.contains("tool_search_call"));
+        // 正常消息保留
+        assert_eq!(stripped["input"].as_array().unwrap().len(), 2);
+
+        // 无可剥内容 → None（不值得重试）
+        let clean = json!({"model": "gpt-5", "input": [{"type": "message"}]});
+        assert!(codex_body_without_encrypted_and_tool_search(&clean).is_none());
+    }
+
+    /// 端到端：hop-by-hop / dangerous 头剥离、自定义头规则、anyrouter 的
+    /// context-1m beta 与 adaptive thinking 注入，一次请求全验证。
+    #[tokio::test]
+    async fn upstream_request_headers_are_sanitized_and_anyrouter_adapted() {
+        install_test_crypto_provider();
+
+        type Captured = Arc<Mutex<Vec<(HeaderMap, Value)>>>;
+        let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+
+        async fn capture_handler(
+            State(captured): State<Captured>,
+            headers: HeaderMap,
+            body: Bytes,
+        ) -> (StatusCode, &'static str) {
+            let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            captured.lock().await.push((headers, body));
+            (StatusCode::OK, r#"{"ok":true}"#)
+        }
+
+        let app = Router::new()
+            .route("/v1/messages", post(capture_handler))
+            .with_state(captured.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock upstream");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut provider = Provider::with_id(
+            "provider-anyrouter".to_string(),
+            "AnyRouter 备用".to_string(),
+            json!({
+                "base_url": base_url,
+                "env": {"ANTHROPIC_AUTH_TOKEN": "sk-test"}
+            }),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            header_rules: vec![
+                header_rule("override", "x-gateway", "cc-switch"),
+                header_rule("remove", "x-keep-me", ""),
+            ],
+            ..Default::default()
+        });
+        db.save_provider("claude", &provider).unwrap();
+        db.set_current_provider("claude", "provider-anyrouter").unwrap();
+
+        let mut forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.max_attempts = 1;
+        forwarder.current_provider_id_at_start = "provider-anyrouter".to_string();
+        let attempts = forwarder.router.select_providers("claude").await.unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONNECTION,
+            HeaderValue::from_static("keep-alive, x-secret-hop"),
+        );
+        headers.insert("x-secret-hop", HeaderValue::from_static("zzz"));
+        headers.insert("te", HeaderValue::from_static("trailers"));
+        headers.insert("x-trace-id", HeaderValue::from_static("t1"));
+        headers.insert(
+            "anthropic-dangerous-direct-browser-access",
+            HeaderValue::from_static("true"),
+        );
+        headers.insert("x-keep-me", HeaderValue::from_static("should-be-removed"));
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Claude,
+                http::Method::POST,
+                "/v1/messages",
+                json!({
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                headers,
+                Extensions::new(),
+                attempts,
+            )
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => panic!("forward should succeed: {}", err.error),
+        };
+        drop(result);
+
+        let captured = captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        let (upstream_headers, upstream_body) = &captured[0];
+
+        // hop-by-hop（静态 + Connection 点名）与追踪头被剥离
+        for absent in ["connection", "te", "x-secret-hop", "x-trace-id"] {
+            assert!(
+                upstream_headers.get(absent).is_none(),
+                "{absent} should not reach upstream"
+            );
+        }
+        // anthropic 原生格式：dangerous 头透传
+        assert_eq!(
+            upstream_headers
+                .get("anthropic-dangerous-direct-browser-access")
+                .unwrap(),
+            "true"
+        );
+        // 自定义规则：覆盖 + 删除
+        assert_eq!(upstream_headers.get("x-gateway").unwrap(), "cc-switch");
+        assert!(upstream_headers.get("x-keep-me").is_none());
+        // anyrouter：beta 同时含 claude-code 与 context-1m
+        let beta = upstream_headers
+            .get("anthropic-beta")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(beta.contains("claude-code-20250219"), "beta={beta}");
+        assert!(beta.contains("context-1m-2025-08-07"), "beta={beta}");
+        // anyrouter：注入 adaptive thinking
+        assert_eq!(upstream_body["thinking"]["type"], "adaptive");
+    }
+
+    /// 端到端：anyrouter Codex 上游 400 invalid_responses_request →
+    /// 剥 encrypted_content / tool_search_* 后同通道重试成功。
+    #[tokio::test]
+    async fn anyrouter_codex_invalid_responses_request_retries_with_stripped_body() {
+        install_test_crypto_provider();
+
+        type Captured = Arc<Mutex<Vec<Value>>>;
+        let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+
+        async fn responses_handler(
+            State(captured): State<Arc<Mutex<Vec<Value>>>>,
+            body: Bytes,
+        ) -> (StatusCode, &'static str) {
+            let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let mut seen = captured.lock().await;
+            seen.push(body);
+            if seen.len() == 1 {
+                (
+                    StatusCode::BAD_REQUEST,
+                    r#"{"error":{"code":"invalid_responses_request","message":"encrypted content could not be parsed"}}"#,
+                )
+            } else {
+                (StatusCode::OK, r#"{"id":"resp_1","status":"completed"}"#)
+            }
+        }
+
+        let app = Router::new()
+            .route("/v1/responses", post(responses_handler))
+            .with_state(captured.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock upstream");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let provider = Provider::with_id(
+            "provider-ar-codex".to_string(),
+            "anyrouter-codex".to_string(),
+            json!({
+                "base_url": format!("{base_url}/v1"),
+                "env": {"OPENAI_API_KEY": "sk-test"}
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider).unwrap();
+        db.set_current_provider("codex", "provider-ar-codex").unwrap();
+
+        let mut forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.max_attempts = 2;
+        forwarder.current_provider_id_at_start = "provider-ar-codex".to_string();
+        let attempts = forwarder.router.select_providers("codex").await.unwrap();
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Codex,
+                http::Method::POST,
+                "/v1/responses",
+                json!({
+                    "model": "gpt-5",
+                    "stream": false,
+                    "input": [
+                        {"type": "message", "role": "user",
+                         "content": [{"type": "input_text", "text": "hi"}]},
+                        {"type": "tool_search_call", "queries": ["q"]},
+                        {"type": "reasoning", "encrypted_content": "ZZZ", "summary": []}
+                    ]
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                attempts,
+            )
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => panic!("retry with stripped body should succeed: {}", err.error),
+        };
+        drop(result);
+
+        let captured = captured.lock().await;
+        assert_eq!(captured.len(), 2, "exactly one same-channel retry");
+        let first = serde_json::to_string(&captured[0]).unwrap();
+        assert!(first.contains("encrypted_content"));
+        assert!(first.contains("tool_search_call"));
+        let second = serde_json::to_string(&captured[1]).unwrap();
+        assert!(!second.contains("encrypted_content"));
+        assert!(!second.contains("tool_search_call"));
+        assert_eq!(captured[1]["input"].as_array().unwrap().len(), 2);
     }
 }

@@ -34,6 +34,8 @@
 
 - 重试 / 熔断 / 冷却从"供应商级"细化到 **`provider:key` 通道级**，单 Key 失效不会拖垮整个供应商（指数退避冷却）
 - **限流感知调度**：尊重上游 `Retry-After` 精确冷却；瞬时 429 宽限多重试、不轻易下场，配额型 429 自动归入长冷却轨道；全部 Key 冷却时 503 响应附带 `Retry-After` 退避提示
+- **请求头治理**：RFC 7230 hop-by-hop 头（含 `Connection` 点名字段）双向剥离；Anthropic 专属头不泄漏给非 Anthropic 上游；每个供应商可配置**自定义请求头规则**（覆盖 / 追加 / 删除，支持从 CSV 头中精确摘除单个 token，认证头受保护）
+- **anyrouter 渠道适配**：自动注入 `context-1m` beta 与 adaptive thinking（Claude API），Codex API 遇 `invalid_responses_request` 自动剥除加密推理内容后重试（按渠道名或两个官方域名识别）
 - **会话亲和**：同一会话记住上次成功的通道并优先复用，直到其失效或过期
 - 代理转发链路重构：响应处理、错误分类与映射、流式处理统一收敛
 

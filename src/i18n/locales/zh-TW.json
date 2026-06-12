@@ -1094,7 +1094,16 @@
     "pricingModelSourceInherit": "繼承全域預設",
     "pricingModelSourceRequest": "請求模型",
     "pricingModelSourceResponse": "回傳模型",
-    "pricingModelSourceHint": "選擇依請求模型還是回傳模型進行定價比對"
+    "pricingModelSourceHint": "選擇依請求模型還是回傳模型進行定價比對",
+    "headerRules": "自訂請求頭規則",
+    "headerRulesDesc": "按順序改寫發往該供應商的請求頭。認證頭（authorization / x-api-key / x-goog-api-key）受保護，規則不會生效。",
+    "headerRuleOverride": "覆蓋",
+    "headerRuleAppend": "追加",
+    "headerRuleRemove": "刪除",
+    "headerRuleNamePlaceholder": "Header 名稱，如 anthropic-beta",
+    "headerRuleValuePlaceholder": "值",
+    "headerRuleRemoveValuePlaceholder": "留空刪整頭；填 token 按 CSV 摘除",
+    "headerRuleAdd": "新增規則"
   },
   "codexConfig": {
     "authJson": "auth.json (JSON) *",

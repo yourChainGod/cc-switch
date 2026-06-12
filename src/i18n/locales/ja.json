@@ -1123,7 +1123,16 @@
     "pricingModelSourceInherit": "グローバル設定を継承",
     "pricingModelSourceRequest": "リクエストモデル",
     "pricingModelSourceResponse": "レスポンスモデル",
-    "pricingModelSourceHint": "リクエストモデルまたはレスポンスモデルで価格を照合するかを選択"
+    "pricingModelSourceHint": "リクエストモデルまたはレスポンスモデルで価格を照合するかを選択",
+    "headerRules": "カスタムリクエストヘッダー",
+    "headerRulesDesc": "このプロバイダーへ送るリクエストヘッダーを順に書き換えます。認証ヘッダー（authorization / x-api-key / x-goog-api-key）は保護されており変更できません。",
+    "headerRuleOverride": "上書き",
+    "headerRuleAppend": "追加",
+    "headerRuleRemove": "削除",
+    "headerRuleNamePlaceholder": "ヘッダー名（例: anthropic-beta）",
+    "headerRuleValuePlaceholder": "値",
+    "headerRuleRemoveValuePlaceholder": "空でヘッダー削除、token 指定で CSV から摘出",
+    "headerRuleAdd": "ルールを追加"
   },
   "codexConfig": {
     "authJson": "auth.json (JSON) *",
