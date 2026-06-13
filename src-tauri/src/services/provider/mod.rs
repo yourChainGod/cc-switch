@@ -34,7 +34,7 @@ pub use live::{
 pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
-    provider_exists_in_live_config, strip_common_config_from_live_settings,
+    patch_live_config_key, provider_exists_in_live_config, strip_common_config_from_live_settings,
     sync_current_provider_for_app_to_live, write_live_with_common_config,
 };
 
@@ -1523,15 +1523,29 @@ impl ProviderService {
             key.id
         };
 
-        let meta = provider.meta.get_or_insert_with(Default::default);
-        if meta.config_key_id.as_deref() == Some(config_key_id.as_str())
-            && meta.config_key_mode.as_deref().is_some()
+        let existing_binding = state
+            .db
+            .get_provider_config_key_binding(app_type.as_str(), provider.id.as_str())?;
+        if existing_binding
+            .as_ref()
+            .is_some_and(|binding| binding.key_id == config_key_id && !binding.mode.is_empty())
         {
+            let binding = existing_binding.expect("checked above");
+            let meta = provider.meta.get_or_insert_with(Default::default);
+            meta.config_key_id = Some(binding.key_id);
+            meta.config_key_mode = Some(binding.mode);
             return Ok(());
         }
+
+        state.db.set_provider_config_key_binding(
+            app_type.as_str(),
+            provider.id.as_str(),
+            &config_key_id,
+            CONFIG_KEY_MODE_MANUAL,
+        )?;
+        let meta = provider.meta.get_or_insert_with(Default::default);
         meta.config_key_id = Some(config_key_id);
         meta.config_key_mode = Some(CONFIG_KEY_MODE_MANUAL.to_string());
-        state.db.save_provider(app_type.as_str(), provider)?;
         Ok(())
     }
 
@@ -1601,14 +1615,28 @@ impl ProviderService {
             ));
         }
 
-        let mut updated = apply_provider_key_to_config(app_type.as_str(), &provider, &key);
-        {
-            let meta = updated.meta.get_or_insert_with(Default::default);
-            meta.config_key_id = Some(key.id.clone());
-            meta.config_key_mode = Some(mode.to_string());
-        }
+        let updated = apply_provider_key_to_config(app_type.as_str(), &provider, &key);
 
-        Self::update(state, app_type.clone(), Some(provider_id), updated)?;
+        let live_patch = extract_provider_config_key(app_type.as_str(), &updated)
+            .map(|config_key| (config_key.auth_field, config_key.key_value));
+
+        state.db.update_provider_settings_config(
+            app_type.as_str(),
+            provider_id,
+            &updated.settings_config,
+        )?;
+        state
+            .db
+            .set_provider_config_key_binding(app_type.as_str(), provider_id, &key.id, mode)?;
+        Self::sync_config_key_patch_to_live(
+            state,
+            &app_type,
+            &updated,
+            live_patch
+                .as_ref()
+                .map(|(auth_field, key_value)| (auth_field.as_str(), Some(key_value.as_str()))),
+        )?;
+
         state
             .db
             .get_provider_by_id(provider_id, app_type.as_str())?
@@ -1618,6 +1646,87 @@ impl ProviderService {
                     provider_id
                 ))
             })
+    }
+
+    fn sync_config_key_patch_to_live(
+        state: &AppState,
+        app_type: &AppType,
+        provider: &Provider,
+        live_patch: Option<(&str, Option<&str>)>,
+    ) -> Result<(), AppError> {
+        let Some((auth_field, key_value)) = live_patch else {
+            return Ok(());
+        };
+
+        if app_type.is_additive_mode() {
+            let live_config_managed = Self::check_live_config_exists(
+                app_type,
+                &provider.id,
+                Self::provider_live_config_managed(provider),
+            )?;
+            if live_config_managed {
+                patch_live_config_key(
+                    state.db.as_ref(),
+                    app_type,
+                    provider,
+                    auth_field,
+                    key_value,
+                )?;
+            }
+            return Ok(());
+        }
+
+        let effective_current =
+            crate::settings::get_effective_current_provider(&state.db, app_type)?;
+        if effective_current.as_deref() != Some(provider.id.as_str()) {
+            return Ok(());
+        }
+
+        let has_live_backup =
+            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+                .ok()
+                .flatten()
+                .is_some();
+        let live_taken_over = state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(app_type);
+        let should_sync_via_proxy = has_live_backup || live_taken_over;
+
+        if should_sync_via_proxy {
+            if matches!(app_type, AppType::ClaudeDesktop) {
+                patch_live_config_key(
+                    state.db.as_ref(),
+                    app_type,
+                    provider,
+                    auth_field,
+                    key_value,
+                )?;
+            } else {
+                futures::executor::block_on(state.proxy_service.patch_live_backup_config_key(
+                    app_type.as_str(),
+                    auth_field,
+                    key_value,
+                ))
+                .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+            }
+
+            if matches!(app_type, AppType::Claude)
+                && futures::executor::block_on(state.proxy_service.is_running())
+            {
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .sync_claude_live_from_provider_while_proxy_active(provider),
+                )
+                .map_err(|e| AppError::Message(format!("同步 Claude Live 配置失败: {e}")))?;
+            }
+            return Ok(());
+        }
+
+        patch_live_config_key(state.db.as_ref(), app_type, provider, auth_field, key_value)?;
+
+        McpService::sync_all_enabled(state)?;
+        Ok(())
     }
 
     fn sync_auto_config_key_binding(
@@ -1673,20 +1782,37 @@ impl ProviderService {
         provider: Provider,
     ) -> Result<(), AppError> {
         let mut updated = provider;
-        if let Some(config_key) = extract_provider_config_key(app_type.as_str(), &updated) {
-            let _ = clear_provider_key_value(
-                app_type.as_str(),
-                &mut updated.settings_config,
-                &config_key.auth_field,
-                Some(&config_key.key_value),
-            );
-        }
+        let live_patch =
+            if let Some(config_key) = extract_provider_config_key(app_type.as_str(), &updated) {
+                let _ = clear_provider_key_value(
+                    app_type.as_str(),
+                    &mut updated.settings_config,
+                    &config_key.auth_field,
+                    Some(&config_key.key_value),
+                );
+                Some(config_key.auth_field)
+            } else {
+                None
+            };
         if let Some(meta) = updated.meta.as_mut() {
             meta.config_key_id = None;
             meta.config_key_mode = None;
         }
         let provider_id = updated.id.clone();
-        Self::update(state, app_type, Some(provider_id.as_str()), updated)?;
+        state.db.update_provider_settings_config(
+            app_type.as_str(),
+            provider_id.as_str(),
+            &updated.settings_config,
+        )?;
+        state
+            .db
+            .clear_provider_config_key_binding(app_type.as_str(), provider_id.as_str())?;
+        Self::sync_config_key_patch_to_live(
+            state,
+            &app_type,
+            &updated,
+            live_patch.as_deref().map(|auth_field| (auth_field, None)),
+        )?;
         Ok(())
     }
 

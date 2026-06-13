@@ -62,12 +62,15 @@ export function useGeminiCommonConfig({
   const hasInitializedNewMode = useRef(false);
   // 用于跟踪编辑模式是否已初始化显式开关/预览
   const hasInitializedEditMode = useRef(false);
+  const initialSettingsFingerprint = initialData?.settingsConfig
+    ? JSON.stringify(initialData.settingsConfig)
+    : "";
 
   // 当预设变化时，重置初始化标记，使新预设能够重新触发初始化逻辑
   useEffect(() => {
     hasInitializedNewMode.current = false;
     hasInitializedEditMode.current = false;
-  }, [selectedPresetId, initialEnabled]);
+  }, [selectedPresetId, initialEnabled, initialSettingsFingerprint]);
 
   const parseSnippetEnv = useCallback(
     (
@@ -256,8 +259,7 @@ export function useGeminiCommonConfig({
         !inferredHasCommon &&
         Object.keys(parsed.env).length > 0
       ) {
-        const currentEnv = envStringToObj(envValue);
-        const merged = applySnippetToEnv(currentEnv, parsed.env);
+        const merged = applySnippetToEnv(env, parsed.env);
         const nextEnvString = envObjToString(merged);
 
         setCommonConfigError("");

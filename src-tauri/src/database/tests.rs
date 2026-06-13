@@ -269,6 +269,69 @@ fn schema_migration_aligns_column_defaults_and_types() {
 }
 
 #[test]
+fn schema_migration_v14_moves_config_key_binding_out_of_provider_meta() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute("PRAGMA foreign_keys = ON;", [])
+        .expect("enable foreign keys");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL,
+            meta TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id, app_type)
+        );
+        INSERT INTO providers (id, app_type, name, settings_config, meta)
+        VALUES (
+            'provider-a',
+            'claude',
+            'Provider A',
+            '{"env":{"ANTHROPIC_API_KEY":"sk-old"}}',
+            '{"configKeyId":"key-a","configKeyMode":"auto","commonConfigEnabled":true}'
+        );
+        "#,
+    )
+    .expect("seed v13 provider");
+    Database::set_user_version(&conn, 13).expect("set user_version=13");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert!(
+        Database::table_exists(&conn, "provider_config_key_bindings").expect("check binding table"),
+        "binding table should exist"
+    );
+    let (key_id, mode): (String, String) = conn
+        .query_row(
+            "SELECT key_id, mode FROM provider_config_key_bindings
+             WHERE app_type = 'claude' AND provider_id = 'provider-a'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read migrated binding");
+    assert_eq!(key_id, "key-a");
+    assert_eq!(mode, "auto");
+
+    let meta_str: String = conn
+        .query_row(
+            "SELECT meta FROM providers WHERE id = 'provider-a' AND app_type = 'claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read provider meta");
+    let meta: serde_json::Value = serde_json::from_str(&meta_str).expect("parse meta");
+    assert_eq!(meta.get("commonConfigEnabled"), Some(&json!(true)));
+    assert!(meta.get("configKeyId").is_none());
+    assert!(meta.get("configKeyMode").is_none());
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn schema_create_tables_include_pricing_model_columns() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");

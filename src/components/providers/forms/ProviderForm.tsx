@@ -230,6 +230,14 @@ export interface ProviderFormProps {
   };
   showButtons?: boolean;
   isProxyTakeover?: boolean;
+  latestMeta?: ProviderMeta;
+  configKeyPatch?: ProviderConfigKeyPatch | null;
+}
+
+export interface ProviderConfigKeyPatch {
+  id: number;
+  keyValue: string;
+  authField?: string;
 }
 
 export function ProviderForm(props: ProviderFormProps) {
@@ -252,6 +260,8 @@ function ProviderFormFull({
   initialData,
   showButtons = true,
   isProxyTakeover = false,
+  latestMeta,
+  configKeyPatch,
 }: ProviderFormProps) {
   if (appId === "claude-desktop") {
     throw new Error("ProviderFormFull should not receive claude-desktop");
@@ -381,7 +391,15 @@ function ProviderFormFull({
       icon: initialData?.icon ?? "",
       iconColor: initialData?.iconColor ?? "",
     }),
-    [initialData, appId],
+    [
+      appId,
+      initialData?.name,
+      initialData?.websiteUrl,
+      initialData?.notes,
+      initialData?.settingsConfig,
+      initialData?.icon,
+      initialData?.iconColor,
+    ],
   );
 
   const form = useForm<ProviderFormData>({
@@ -423,6 +441,7 @@ function ProviderFormFull({
 
   const {
     apiKey,
+    setApiKey,
     handleApiKeyChange,
     showApiKey: shouldShowApiKey,
   } = useApiKeyState({
@@ -489,6 +508,47 @@ function ProviderFormFull({
       }
     },
     [localApiKeyField, form, handleSettingsConfigChange],
+  );
+
+  const patchClaudeConfigKey = useCallback(
+    (keyValue: string, authField?: string) => {
+      const field: ClaudeApiKeyField =
+        authField === "ANTHROPIC_API_KEY"
+          ? "ANTHROPIC_API_KEY"
+          : authField === "ANTHROPIC_AUTH_TOKEN"
+            ? "ANTHROPIC_AUTH_TOKEN"
+            : localApiKeyField;
+      setLocalApiKeyField(field);
+      setApiKey(keyValue);
+
+      try {
+        const raw = form.getValues("settingsConfig");
+        const config = JSON.parse(raw || "{}") as {
+          env?: Record<string, unknown>;
+        };
+        if (!config.env || typeof config.env !== "object") {
+          config.env = {};
+        }
+        if (field === "ANTHROPIC_API_KEY") {
+          delete config.env.ANTHROPIC_AUTH_TOKEN;
+        } else {
+          delete config.env.ANTHROPIC_API_KEY;
+        }
+        config.env[field] = keyValue;
+        const updated = JSON.stringify(config, null, 2);
+        form.setValue("settingsConfig", updated);
+        handleSettingsConfigChange(updated);
+      } catch {
+        handleApiKeyChange(keyValue);
+      }
+    },
+    [
+      form,
+      handleApiKeyChange,
+      handleSettingsConfigChange,
+      localApiKeyField,
+      setApiKey,
+    ],
   );
 
   const [codexChatReasoning, setCodexChatReasoning] =
@@ -818,6 +878,35 @@ function ProviderFormFull({
     data: hermesLiveProviderIds = [],
     isLoading: isHermesLiveProviderIdsLoading,
   } = useHermesLiveProviderIds(appId === "hermes");
+
+  useEffect(() => {
+    if (!configKeyPatch) return;
+    const keyValue = configKeyPatch.keyValue;
+
+    if (appId === "claude") {
+      patchClaudeConfigKey(keyValue, configKeyPatch.authField);
+      return;
+    }
+    if (appId === "codex") {
+      handleCodexApiKeyChange(keyValue);
+      return;
+    }
+    if (appId === "gemini") {
+      handleGeminiApiKeyChange(keyValue);
+      return;
+    }
+    if (appId === "opencode" && !isAnyOmoCategory) {
+      opencodeForm.handleOpencodeApiKeyChange(keyValue);
+      return;
+    }
+    if (appId === "openclaw") {
+      openclawForm.handleOpenclawApiKeyChange(keyValue);
+      return;
+    }
+    if (appId === "hermes") {
+      hermesForm.handleHermesApiKeyChange(keyValue);
+    }
+  }, [configKeyPatch?.id]);
 
   const additiveExistingProviderKeys = useMemo(() => {
     if (appId === "opencode" && !isAnyOmoCategory) {
@@ -1292,11 +1381,14 @@ function ProviderFormFull({
       }
     }
 
-    const baseMeta: ProviderMeta | undefined =
-      payload.meta ?? (initialData?.meta ? { ...initialData.meta } : undefined);
+    const baseMeta: ProviderMeta = {
+      ...(initialData?.meta ?? {}),
+      ...(latestMeta ?? {}),
+      ...(payload.meta ?? {}),
+    };
 
     const nextMeta: ProviderMeta = {
-      ...(baseMeta ?? {}),
+      ...baseMeta,
       commonConfigEnabled:
         appId === "claude"
           ? useCommonConfig

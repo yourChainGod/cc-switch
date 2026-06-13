@@ -1,4 +1,6 @@
-use cc_switch_lib::{AppState, AppType, Database, Provider, ProviderKeyInput, ProviderService};
+use cc_switch_lib::{
+    AppState, AppType, Database, Provider, ProviderKeyInput, ProviderMeta, ProviderService,
+};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -324,6 +326,190 @@ fn config_key_binding_writes_provider_config_and_repairs_when_disabled() {
             .as_ref()
             .and_then(|meta| meta.config_key_mode.as_deref()),
         Some("auto")
+    );
+}
+
+#[test]
+fn config_key_switch_only_patches_auth_key_and_binding_meta() {
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let state = AppState::new(db.clone());
+    let app_type = AppType::Claude;
+
+    db.set_config_snippet(
+        app_type.as_str(),
+        Some(json!({"includeCoAuthoredBy": false}).to_string()),
+    )
+    .expect("save common config snippet");
+
+    let original_settings = json!({
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "sk-old",
+        },
+        "includeCoAuthoredBy": false,
+        "customConfig": {
+            "nested": true,
+            "label": "must stay",
+        },
+        "permissions": {
+            "allow": ["Bash(ls)"],
+        },
+    });
+    let provider = Provider {
+        id: "provider-a".to_string(),
+        name: "Provider A".to_string(),
+        settings_config: original_settings.clone(),
+        website_url: None,
+        category: Some("third_party".to_string()),
+        created_at: Some(1),
+        sort_index: Some(1),
+        notes: None,
+        meta: Some(ProviderMeta {
+            common_config_enabled: Some(true),
+            api_key_field: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+            ..ProviderMeta::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider(app_type.as_str(), &provider)
+        .expect("save provider fixture");
+
+    let key = db
+        .add_provider_key(
+            app_type.as_str(),
+            "provider-a",
+            &ProviderKeyInput {
+                name: "new key".to_string(),
+                key_value: "sk-new".to_string(),
+                auth_field: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+                enabled: true,
+                priority: 10,
+                weight: 1,
+            },
+        )
+        .expect("insert provider key");
+
+    let updated = ProviderService::set_config_key(&state, app_type.clone(), "provider-a", &key.id)
+        .expect("set config key");
+
+    let mut expected_settings = original_settings;
+    expected_settings["env"]["ANTHROPIC_AUTH_TOKEN"] = json!("sk-new");
+    assert_eq!(updated.settings_config, expected_settings);
+
+    let meta = updated.meta.as_ref().expect("provider meta");
+    assert_eq!(meta.common_config_enabled, Some(true));
+    assert_eq!(meta.api_key_field.as_deref(), Some("ANTHROPIC_AUTH_TOKEN"));
+    assert_eq!(meta.config_key_id.as_deref(), Some(key.id.as_str()));
+    assert_eq!(meta.config_key_mode.as_deref(), Some("manual"));
+
+    let binding = db
+        .get_provider_config_key_binding(app_type.as_str(), "provider-a")
+        .expect("read config key binding")
+        .expect("binding exists");
+    assert_eq!(binding.key_id, key.id);
+    assert_eq!(binding.mode, "manual");
+
+    let stored = db
+        .get_provider_by_id("provider-a", app_type.as_str())
+        .expect("read stored provider")
+        .expect("provider exists");
+    assert_eq!(stored.settings_config, expected_settings);
+}
+
+#[test]
+fn save_provider_does_not_overwrite_config_key_binding_from_meta() {
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let app_type = AppType::Claude;
+
+    let provider = Provider {
+        id: "provider-a".to_string(),
+        name: "Provider A".to_string(),
+        settings_config: json!({"env": {"ANTHROPIC_API_KEY": "legacy-key"}}),
+        website_url: None,
+        category: Some("third_party".to_string()),
+        created_at: Some(1),
+        sort_index: Some(1),
+        notes: None,
+        meta: Some(ProviderMeta {
+            common_config_enabled: Some(true),
+            ..ProviderMeta::default()
+        }),
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider(app_type.as_str(), &provider)
+        .expect("save provider fixture");
+
+    let first = db
+        .add_provider_key(
+            app_type.as_str(),
+            "provider-a",
+            &ProviderKeyInput {
+                name: "first".to_string(),
+                key_value: "sk-first".to_string(),
+                auth_field: Some("ANTHROPIC_API_KEY".to_string()),
+                enabled: true,
+                priority: 10,
+                weight: 1,
+            },
+        )
+        .expect("insert first key");
+    let stale = db
+        .add_provider_key(
+            app_type.as_str(),
+            "provider-a",
+            &ProviderKeyInput {
+                name: "stale".to_string(),
+                key_value: "sk-stale".to_string(),
+                auth_field: Some("ANTHROPIC_API_KEY".to_string()),
+                enabled: true,
+                priority: 20,
+                weight: 1,
+            },
+        )
+        .expect("insert stale key");
+
+    db.set_provider_config_key_binding(app_type.as_str(), "provider-a", &first.id, "manual")
+        .expect("seed binding");
+
+    let mut edited = db
+        .get_provider_by_id("provider-a", app_type.as_str())
+        .expect("read provider")
+        .expect("provider exists");
+    edited.name = "Provider A edited".to_string();
+    let meta = edited.meta.get_or_insert_with(Default::default);
+    meta.config_key_id = Some(stale.id.clone());
+    meta.config_key_mode = Some("auto".to_string());
+    db.save_provider(app_type.as_str(), &edited)
+        .expect("ordinary save provider");
+
+    let binding = db
+        .get_provider_config_key_binding(app_type.as_str(), "provider-a")
+        .expect("read binding")
+        .expect("binding exists");
+    assert_eq!(binding.key_id.as_str(), first.id.as_str());
+    assert_eq!(binding.mode, "manual");
+
+    let stored = db
+        .get_provider_by_id("provider-a", app_type.as_str())
+        .expect("read stored provider")
+        .expect("provider exists");
+    assert_eq!(stored.name, "Provider A edited");
+    assert_eq!(
+        stored
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.config_key_id.as_deref()),
+        Some(first.id.as_str())
+    );
+    assert_eq!(
+        stored
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.config_key_mode.as_deref()),
+        Some("manual")
     );
 }
 
@@ -1359,7 +1545,9 @@ fn zero_grace_cooldown_keeps_legacy_backoff_semantics() {
         .get_provider_key(app_type, "provider-a", &key.id)
         .expect("get key")
         .expect("key exists");
-    let until = cooled.cooldown_until.expect("immediate cooldown when grace=0");
+    let until = cooled
+        .cooldown_until
+        .expect("immediate cooldown when grace=0");
     assert!((until - before - 60).abs() <= 2, "first cooldown ≈ 60s");
 }
 

@@ -60,6 +60,7 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         Self::create_provider_keys_table(conn)?;
+        Self::create_provider_config_key_bindings_table(conn)?;
         Self::create_session_affinity_table(conn)?;
         Self::create_working_channel_affinity_table(conn)?;
 
@@ -455,6 +456,11 @@ impl Database {
                         log::info!("迁移数据库从 v12 到 v13（添加网关签到计划字段）");
                         Self::migrate_v12_to_v13(conn)?;
                         Self::set_user_version(conn, 13)?;
+                    }
+                    13 => {
+                        log::info!("迁移数据库从 v13 到 v14（配置 Key 绑定关系表）");
+                        Self::migrate_v13_to_v14(conn)?;
+                        Self::set_user_version(conn, 14)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1254,6 +1260,14 @@ impl Database {
         Ok(())
     }
 
+    /// v13 -> v14 迁移：将配置 Key 绑定从 providers.meta 拆到独立关系表。
+    fn migrate_v13_to_v14(conn: &Connection) -> Result<(), AppError> {
+        Self::create_provider_config_key_bindings_table(conn)?;
+        Self::migrate_config_key_bindings_from_provider_meta(conn)?;
+        log::info!("v13 -> v14 迁移完成：已迁移配置 Key 绑定关系");
+        Ok(())
+    }
+
     fn create_provider_keys_table(conn: &Connection) -> Result<(), AppError> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS provider_keys (
@@ -1294,6 +1308,128 @@ impl Database {
             [],
         )
         .map_err(|e| AppError::Database(format!("创建 provider_keys status 索引失败: {e}")))?;
+
+        Ok(())
+    }
+
+    fn create_provider_config_key_bindings_table(conn: &Connection) -> Result<(), AppError> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS provider_config_key_bindings (
+                app_type TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'manual'
+                    CHECK (mode IN ('auto', 'manual')),
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (app_type, provider_id),
+                FOREIGN KEY (provider_id, app_type)
+                    REFERENCES providers(id, app_type) ON DELETE CASCADE
+            )",
+            [],
+        )
+        .map_err(|e| {
+            AppError::Database(format!("创建 provider_config_key_bindings 表失败: {e}"))
+        })?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_provider_config_key_bindings_key
+             ON provider_config_key_bindings(key_id)",
+            [],
+        )
+        .map_err(|e| {
+            AppError::Database(format!(
+                "创建 provider_config_key_bindings key 索引失败: {e}"
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    fn migrate_config_key_bindings_from_provider_meta(conn: &Connection) -> Result<(), AppError> {
+        let mut stmt = conn
+            .prepare("SELECT id, app_type, meta FROM providers")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut provider_updates = Vec::new();
+        let mut binding_updates = Vec::new();
+        for row in rows {
+            let (provider_id, app_type, meta_str) =
+                row.map_err(|e| AppError::Database(e.to_string()))?;
+            let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&meta_str) else {
+                continue;
+            };
+
+            let key_id = meta
+                .get("configKeyId")
+                .or_else(|| meta.get("config_key_id"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+
+            if let Some(key_id) = key_id {
+                let mode = meta
+                    .get("configKeyMode")
+                    .or_else(|| meta.get("config_key_mode"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|mode| matches!(*mode, "auto" | "manual"))
+                    .unwrap_or("manual")
+                    .to_string();
+                binding_updates.push((app_type.clone(), provider_id.clone(), key_id, mode));
+            }
+
+            let mut changed = false;
+            if let Some(obj) = meta.as_object_mut() {
+                changed |= obj.remove("configKeyId").is_some();
+                changed |= obj.remove("configKeyMode").is_some();
+                changed |= obj.remove("config_key_id").is_some();
+                changed |= obj.remove("config_key_mode").is_some();
+            }
+
+            if changed {
+                let updated_meta =
+                    serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?;
+                provider_updates.push((updated_meta, provider_id, app_type));
+            }
+        }
+        drop(stmt);
+
+        let now = chrono::Utc::now().timestamp();
+        for (app_type, provider_id, key_id, mode) in binding_updates {
+            conn.execute(
+                "INSERT INTO provider_config_key_bindings (
+                    app_type, provider_id, key_id, mode, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                ON CONFLICT(app_type, provider_id) DO UPDATE SET
+                    key_id = excluded.key_id,
+                    mode = excluded.mode,
+                    updated_at = excluded.updated_at",
+                params![app_type, provider_id, key_id, mode, now],
+            )
+            .map_err(|e| AppError::Database(format!("迁移配置 Key 绑定关系失败: {e}")))?;
+        }
+
+        for (meta, provider_id, app_type) in provider_updates {
+            conn.execute(
+                "UPDATE providers SET meta = ?1 WHERE id = ?2 AND app_type = ?3",
+                params![meta, provider_id, app_type],
+            )
+            .map_err(|e| {
+                AppError::Database(format!("清理 provider meta 中配置 Key 字段失败: {e}"))
+            })?;
+        }
 
         Ok(())
     }

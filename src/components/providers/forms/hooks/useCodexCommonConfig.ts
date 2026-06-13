@@ -48,12 +48,15 @@ export function useCodexCommonConfig({
   const hasInitializedNewMode = useRef(false);
   // 用于跟踪编辑模式是否已初始化显式开关/预览
   const hasInitializedEditMode = useRef(false);
+  const initialSettingsFingerprint = initialData?.settingsConfig
+    ? JSON.stringify(initialData.settingsConfig)
+    : "";
 
   // 当预设变化时，重置初始化标记，使新预设能够重新触发初始化逻辑
   useEffect(() => {
     hasInitializedNewMode.current = false;
     hasInitializedEditMode.current = false;
-  }, [selectedPresetId, initialEnabled]);
+  }, [selectedPresetId, initialEnabled, initialSettingsFingerprint]);
 
   const parseCommonConfigSnippet = useCallback((snippetString: string) => {
     const trimmed = snippetString.trim();
@@ -152,12 +155,12 @@ export function useCodexCommonConfig({
       return;
     }
 
-    const config =
+    const codexConfigValue =
       typeof initialData.settingsConfig.config === "string"
         ? initialData.settingsConfig.config
         : "";
     const inferredHasCommon = hasTomlCommonConfigSnippet(
-      config,
+      codexConfigValue,
       commonConfigSnippet,
     );
 
@@ -169,7 +172,7 @@ export function useCodexCommonConfig({
     // 如果应该启用通用配置但配置中还没有，则自动添加
     if (hasCommon && !inferredHasCommon && parsedSnippet.hasContent) {
       const { updatedConfig, error } = updateTomlCommonConfigSnippet(
-        codexConfig,
+        codexConfigValue,
         commonConfigSnippet,
         true,
       );

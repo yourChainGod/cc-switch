@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { Save } from "lucide-react";
@@ -8,6 +8,7 @@ import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import type { Provider, ProviderKey } from "@/types";
 import {
   ProviderForm,
+  type ProviderConfigKeyPatch,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
 import {
@@ -50,6 +51,9 @@ export function EditProviderDialog({
   const [isKeysSaving, setIsKeysSaving] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [isKeyPoolOpen, setIsKeyPoolOpen] = useState(false);
+  const [configKeyPatch, setConfigKeyPatch] =
+    useState<ProviderConfigKeyPatch | null>(null);
+  const configKeyPatchSeqRef = useRef(0);
 
   // 默认使用传入的 provider.settingsConfig，若当前编辑对象是"当前生效供应商"，则尝试读取实时配置替换初始值
   const [liveSettings, setLiveSettings] = useState<Record<
@@ -63,6 +67,7 @@ export function EditProviderDialog({
   useEffect(() => {
     if (open) {
       setCurrentProvider(provider);
+      setConfigKeyPatch(null);
     } else {
       setIsKeyPoolOpen(false);
     }
@@ -70,6 +75,63 @@ export function EditProviderDialog({
 
   const activeProvider = currentProvider ?? provider;
   const activeProviderId = activeProvider?.id;
+
+  const queueConfigKeyPatch = useCallback(
+    (
+      updatedProvider: Provider,
+      explicitKey?: Pick<ProviderKey, "keyValue" | "authField"> | null,
+    ) => {
+      let keyValue = explicitKey?.keyValue;
+      let authField = explicitKey?.authField;
+
+      if (keyValue === undefined) {
+        const embedded = extractEmbeddedProviderKey(
+          appId,
+          updatedProvider.settingsConfig,
+          updatedProvider.meta,
+        );
+        keyValue = embedded?.value;
+        authField = authField ?? embedded?.authField;
+      }
+
+      if (typeof keyValue !== "string") return;
+
+      setConfigKeyPatch({
+        id: ++configKeyPatchSeqRef.current,
+        keyValue,
+        authField,
+      });
+    },
+    [appId],
+  );
+
+  const applyKeyPoolProviderUpdate = useCallback(
+    (
+      updatedProvider: Provider,
+      explicitKey?: Pick<ProviderKey, "keyValue" | "authField"> | null,
+    ) => {
+      const shouldPatchConfigKey =
+        explicitKey !== undefined ||
+        hasConfigKeyBindingChanged(appId, activeProvider, updatedProvider);
+
+      setLiveSettings(null);
+      setCurrentProvider((previous) => {
+        if (!previous || previous.id !== updatedProvider.id) {
+          return updatedProvider;
+        }
+
+        return {
+          ...previous,
+          meta: updatedProvider.meta,
+          inFailoverQueue: updatedProvider.inFailoverQueue,
+        };
+      });
+      if (shouldPatchConfigKey) {
+        queueConfigKeyPatch(updatedProvider, explicitKey);
+      }
+    },
+    [activeProvider, appId, queueConfigKeyPatch],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -168,15 +230,14 @@ export function EditProviderDialog({
     try {
       const refreshed = await providersApi.get(appId, activeProviderId);
       if (refreshed) {
-        setLiveSettings(null);
-        setCurrentProvider(refreshed);
+        applyKeyPoolProviderUpdate(refreshed);
       }
       return refreshed;
     } catch (error) {
       console.error("Failed to refresh provider:", error);
       return null;
     }
-  }, [appId, open, activeProviderId]);
+  }, [appId, open, activeProviderId, applyKeyPoolProviderUpdate]);
 
   const loadProviderKeys = useCallback(async () => {
     if (!open || !activeProviderId) {
@@ -255,7 +316,12 @@ export function EditProviderDialog({
   }, [
     open, // 修复：编辑保存后再次打开显示旧数据，依赖 open 确保每次打开时重新读取最新 provider 数据
     activeProvider?.id, // 只依赖 ID，provider 对象更新不会触发重新计算
-    activeProvider?.meta, // 需要依赖 meta 以便正确初始化 testConfig
+    activeProvider?.name,
+    activeProvider?.notes,
+    activeProvider?.websiteUrl,
+    activeProvider?.category,
+    activeProvider?.icon,
+    activeProvider?.iconColor,
     initialSettingsConfig,
   ]);
 
@@ -294,8 +360,7 @@ export function EditProviderDialog({
           activeProvider.id,
           key.id,
         );
-        setLiveSettings(null);
-        setCurrentProvider(updatedProvider);
+        applyKeyPoolProviderUpdate(updatedProvider, key);
         await loadProviderKeys();
         await refreshProviderKeySummaries();
         toast.success(
@@ -315,7 +380,14 @@ export function EditProviderDialog({
         setIsKeysSaving(false);
       }
     },
-    [activeProvider, appId, loadProviderKeys, refreshProviderKeySummaries, t],
+    [
+      activeProvider,
+      appId,
+      applyKeyPoolProviderUpdate,
+      loadProviderKeys,
+      refreshProviderKeySummaries,
+      t,
+    ],
   );
 
   const handleSetConfigKeyAuto = useCallback(async () => {
@@ -326,8 +398,7 @@ export function EditProviderDialog({
         appId,
         activeProvider.id,
       );
-      setLiveSettings(null);
-      setCurrentProvider(updatedProvider);
+      applyKeyPoolProviderUpdate(updatedProvider);
       await loadProviderKeys();
       await refreshProviderKeySummaries();
       toast.success(
@@ -346,7 +417,14 @@ export function EditProviderDialog({
     } finally {
       setIsKeysSaving(false);
     }
-  }, [activeProvider, appId, loadProviderKeys, refreshProviderKeySummaries, t]);
+  }, [
+    activeProvider,
+    appId,
+    applyKeyPoolProviderUpdate,
+    loadProviderKeys,
+    refreshProviderKeySummaries,
+    t,
+  ]);
 
   const handleSubmit = useCallback(
     async (values: ProviderFormValues) => {
@@ -736,6 +814,8 @@ export function EditProviderDialog({
           onCancel={() => onOpenChange(false)}
           onSubmittingChange={setIsFormSubmitting}
           initialData={initialData}
+          latestMeta={activeProvider.meta}
+          configKeyPatch={configKeyPatch}
           showButtons={false}
           isProxyTakeover={isProxyTakeover}
         />
@@ -869,4 +949,29 @@ function isImportableKeyValue(value: string | null): value is string {
   if (!value) return false;
   const trimmed = value.trim();
   return trimmed.length > 0 && trimmed !== "PROXY_MANAGED";
+}
+
+function hasConfigKeyBindingChanged(
+  appId: AppId,
+  previous: Provider | null | undefined,
+  next: Provider,
+): boolean {
+  if (!previous || previous.id !== next.id) return true;
+  const previousKey = extractEmbeddedProviderKey(
+    appId,
+    previous.settingsConfig,
+    previous.meta,
+  );
+  const nextKey = extractEmbeddedProviderKey(
+    appId,
+    next.settingsConfig,
+    next.meta,
+  );
+
+  return (
+    previous.meta?.configKeyId !== next.meta?.configKeyId ||
+    previous.meta?.configKeyMode !== next.meta?.configKeyMode ||
+    previousKey?.authField !== nextKey?.authField ||
+    previousKey?.value !== nextKey?.value
+  );
 }

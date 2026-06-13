@@ -2,7 +2,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 
 type OmoProviderRow = (
@@ -17,6 +17,38 @@ type OmoProviderRow = (
 );
 
 impl Database {
+    fn strip_config_key_binding_meta(meta: &mut ProviderMeta) {
+        meta.config_key_id = None;
+        meta.config_key_mode = None;
+    }
+
+    fn hydrate_provider_config_key_binding_meta_on_conn(
+        conn: &rusqlite::Connection,
+        app_type: &str,
+        provider: &mut Provider,
+    ) -> Result<(), AppError> {
+        let binding: Option<(String, String)> = conn
+            .query_row(
+                "SELECT key_id, mode
+                 FROM provider_config_key_bindings
+                 WHERE app_type = ?1 AND provider_id = ?2",
+                params![app_type, provider.id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        if let Some((key_id, mode)) = binding {
+            let meta = provider.meta.get_or_insert_with(Default::default);
+            meta.config_key_id = Some(key_id);
+            meta.config_key_mode = Some(mode);
+        } else if let Some(meta) = provider.meta.as_mut() {
+            Self::strip_config_key_binding_meta(meta);
+        }
+
+        Ok(())
+    }
+
     pub fn get_all_providers(
         &self,
         app_type: &str,
@@ -102,6 +134,7 @@ impl Database {
                 meta.custom_endpoints = custom_endpoints;
             }
 
+            Self::hydrate_provider_config_key_binding_meta_on_conn(&conn, app_type, &mut provider)?;
             providers.insert(id, provider);
         }
 
@@ -171,7 +204,14 @@ impl Database {
         );
 
         match result {
-            Ok(provider) => Ok(Some(provider)),
+            Ok(mut provider) => {
+                Self::hydrate_provider_config_key_binding_meta_on_conn(
+                    &conn,
+                    app_type,
+                    &mut provider,
+                )?;
+                Ok(Some(provider))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
@@ -185,6 +225,7 @@ impl Database {
 
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
         let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
+        Self::strip_config_key_binding_meta(&mut meta_clone);
 
         let existing: Option<(bool, bool)> = tx
             .query_row(

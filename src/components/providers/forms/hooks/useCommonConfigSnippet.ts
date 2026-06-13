@@ -51,13 +51,16 @@ export function useCommonConfigSnippet({
   const hasInitializedNewMode = useRef(false);
   // 用于跟踪编辑模式是否已初始化显式开关/预览
   const hasInitializedEditMode = useRef(false);
+  const initialSettingsFingerprint = initialData?.settingsConfig
+    ? JSON.stringify(initialData.settingsConfig)
+    : "";
 
   // 当预设变化时，重置初始化标记，使新预设能够重新触发初始化逻辑
   useEffect(() => {
     if (!enabled) return;
     hasInitializedNewMode.current = false;
     hasInitializedEditMode.current = false;
-  }, [selectedPresetId, enabled, initialEnabled]);
+  }, [selectedPresetId, enabled, initialEnabled, initialSettingsFingerprint]);
 
   // 初始化：从 config.json 加载，支持从 localStorage 迁移
   useEffect(() => {
@@ -135,8 +138,13 @@ export function useCommonConfigSnippet({
 
       // 如果应该启用通用配置但配置中还没有，则自动添加
       if (hasCommon && !inferredHasCommon) {
+        const baseConfig = JSON.stringify(
+          initialData.settingsConfig ?? {},
+          null,
+          2,
+        );
         const { updatedConfig, error } = updateCommonConfigSnippet(
-          settingsConfig,
+          baseConfig,
           commonConfigSnippet,
           true,
         );

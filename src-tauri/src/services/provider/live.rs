@@ -12,7 +12,7 @@ use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::error::AppError;
-use crate::provider::Provider;
+use crate::provider::{clear_provider_key_value, set_provider_key_value, Provider};
 use crate::services::mcp::McpService;
 use crate::store::AppState;
 
@@ -526,6 +526,91 @@ pub(crate) fn write_live_with_common_config(
     }
 
     write_live_snapshot(app_type, &effective_provider)
+}
+
+pub(crate) fn patch_live_config_key(
+    _db: &Database,
+    app_type: &AppType,
+    provider: &Provider,
+    auth_field: &str,
+    key_value: Option<&str>,
+) -> Result<(), AppError> {
+    if matches!(app_type, AppType::ClaudeDesktop) {
+        return Err(AppError::localized(
+            "claude_desktop.live.key_patch_unsupported",
+            "Claude Desktop 配置 Key 不能通过通用 live patch 更新，请使用供应商切换流程。",
+            "Claude Desktop config keys cannot be updated through the generic live patch path.",
+        ));
+    }
+
+    if app_type.is_additive_mode() {
+        let mut provider_config = match app_type {
+            AppType::OpenCode => crate::opencode_config::get_providers()?
+                .get(provider.id.as_str())
+                .cloned(),
+            AppType::OpenClaw => crate::openclaw_config::get_provider(provider.id.as_str())?,
+            AppType::Hermes => crate::hermes_config::get_provider(provider.id.as_str())?,
+            _ => None,
+        }
+        .ok_or_else(|| {
+            AppError::Message(format!(
+                "Provider '{}' does not exist in live config for '{}'",
+                provider.id,
+                app_type.as_str()
+            ))
+        })?;
+
+        match key_value {
+            Some(value) => {
+                set_provider_key_value(app_type.as_str(), &mut provider_config, auth_field, value)
+            }
+            None => {
+                let _ = clear_provider_key_value(
+                    app_type.as_str(),
+                    &mut provider_config,
+                    auth_field,
+                    None,
+                );
+            }
+        }
+
+        return match app_type {
+            AppType::OpenCode => {
+                crate::opencode_config::set_provider(provider.id.as_str(), provider_config)
+            }
+            AppType::OpenClaw => {
+                crate::openclaw_config::set_provider(provider.id.as_str(), provider_config)
+                    .map(|_| ())
+            }
+            AppType::Hermes => {
+                crate::hermes_config::set_provider(provider.id.as_str(), provider_config)
+                    .map(|_| ())
+            }
+            _ => Ok(()),
+        };
+    }
+
+    let live_settings = read_live_settings(app_type.clone())?;
+
+    let mut live_provider = provider.clone();
+    live_provider.settings_config = live_settings;
+    match key_value {
+        Some(value) => set_provider_key_value(
+            app_type.as_str(),
+            &mut live_provider.settings_config,
+            auth_field,
+            value,
+        ),
+        None => {
+            let _ = clear_provider_key_value(
+                app_type.as_str(),
+                &mut live_provider.settings_config,
+                auth_field,
+                None,
+            );
+        }
+    }
+    write_live_snapshot(app_type, &live_provider)
 }
 
 pub(crate) fn strip_common_config_from_live_settings(

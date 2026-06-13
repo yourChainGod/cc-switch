@@ -424,6 +424,17 @@ fn default_provider_key_weight() -> i64 {
     1
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfigKeyBinding {
+    pub app_type: String,
+    pub provider_id: String,
+    pub key_id: String,
+    pub mode: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderConfigKey {
     pub auth_field: String,

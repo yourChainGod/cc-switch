@@ -5,7 +5,7 @@
 use crate::app_config::AppType;
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
-use crate::provider::Provider;
+use crate::provider::{clear_provider_key_value, set_provider_key_value, Provider};
 use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
@@ -168,10 +168,7 @@ impl ProxyService {
         let mut effective_settings = effective_provider.settings_config.clone();
         let (proxy_url, _) = self.build_proxy_urls().await?;
 
-        Self::apply_claude_takeover_fields(
-            &mut effective_settings,
-            &proxy_url,
-        );
+        Self::apply_claude_takeover_fields(&mut effective_settings, &proxy_url);
         self.write_claude_live(&effective_settings)?;
         Ok(())
     }
@@ -1811,6 +1808,55 @@ impl ProxyService {
             .await
     }
 
+    /// Patch only the auth key field inside an existing Live backup.
+    ///
+    /// Key selection must not rebuild the backup from provider settings, because
+    /// that would re-apply common config and overwrite unrelated live-only state.
+    pub async fn patch_live_backup_config_key(
+        &self,
+        app_type: &str,
+        auth_field: &str,
+        key_value: Option<&str>,
+    ) -> Result<(), String> {
+        let _guard = self.switch_locks.lock_for_app(app_type).await;
+        let app_type_enum =
+            AppType::from_str(app_type).map_err(|_| format!("未知的应用类型: {app_type}"))?;
+
+        if !matches!(
+            app_type_enum,
+            AppType::Claude | AppType::Codex | AppType::Gemini
+        ) {
+            return Err(format!("不支持为 {app_type} patch Live 备份配置 Key"));
+        }
+
+        let backup = self
+            .db
+            .get_live_backup(app_type)
+            .await
+            .map_err(|e| format!("读取 {app_type} Live 备份失败: {e}"))?
+            .ok_or_else(|| format!("{app_type} Live 备份不存在，无法只 patch 配置 Key"))?;
+        let mut backup_value: Value = serde_json::from_str(&backup.original_config)
+            .map_err(|e| format!("解析 {app_type} Live 备份失败: {e}"))?;
+
+        match key_value {
+            Some(value) => {
+                set_provider_key_value(app_type, &mut backup_value, auth_field, value);
+            }
+            None => {
+                let _ = clear_provider_key_value(app_type, &mut backup_value, auth_field, None);
+            }
+        }
+
+        let backup_json = serde_json::to_string(&backup_value)
+            .map_err(|e| format!("序列化 {app_type} Live 备份失败: {e}"))?;
+        self.db
+            .save_live_backup(app_type, &backup_json)
+            .await
+            .map_err(|e| format!("保存 {app_type} Live 备份失败: {e}"))?;
+
+        Ok(())
+    }
+
     /// 仅供已持有 per-app 切换锁的调用方使用。
     async fn update_live_backup_from_provider_inner(
         &self,
@@ -2583,9 +2629,6 @@ mod tests {
         )
         .expect("write models_cache.json");
     }
-
-
-
 
     #[test]
     fn normal_claude_takeover_without_token_keeps_auth_token_fallback() {

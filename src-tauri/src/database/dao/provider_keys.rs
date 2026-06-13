@@ -1,12 +1,24 @@
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::provider::{ProviderKey, ProviderKeyInput, ProviderKeyStatus, ProviderKeySummary};
+use crate::provider::{
+    ProviderConfigKeyBinding, ProviderKey, ProviderKeyInput, ProviderKeyStatus, ProviderKeySummary,
+};
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, Row};
 use uuid::Uuid;
 
 fn now_ts() -> i64 {
     Utc::now().timestamp()
+}
+
+fn normalize_config_key_mode(mode: &str) -> Result<&'static str, AppError> {
+    match mode.trim() {
+        "auto" => Ok("auto"),
+        "manual" => Ok("manual"),
+        other => Err(AppError::Database(format!(
+            "Invalid provider config key binding mode: {other}"
+        ))),
+    }
 }
 
 fn map_provider_key_row(row: &Row<'_>) -> rusqlite::Result<ProviderKey> {
@@ -33,6 +45,71 @@ fn map_provider_key_row(row: &Row<'_>) -> rusqlite::Result<ProviderKey> {
 }
 
 impl Database {
+    pub fn get_provider_config_key_binding(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<Option<ProviderConfigKeyBinding>, AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.query_row(
+            "SELECT app_type, provider_id, key_id, mode, created_at, updated_at
+             FROM provider_config_key_bindings
+             WHERE app_type = ?1 AND provider_id = ?2",
+            params![app_type, provider_id],
+            |row| {
+                Ok(ProviderConfigKeyBinding {
+                    app_type: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    key_id: row.get(2)?,
+                    mode: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    pub fn set_provider_config_key_binding(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        key_id: &str,
+        mode: &str,
+    ) -> Result<(), AppError> {
+        let mode = normalize_config_key_mode(mode)?;
+        let now = now_ts();
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "INSERT INTO provider_config_key_bindings (
+                app_type, provider_id, key_id, mode, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            ON CONFLICT(app_type, provider_id) DO UPDATE SET
+                key_id = excluded.key_id,
+                mode = excluded.mode,
+                updated_at = excluded.updated_at",
+            params![app_type, provider_id, key_id, mode, now],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn clear_provider_config_key_binding(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "DELETE FROM provider_config_key_bindings
+             WHERE app_type = ?1 AND provider_id = ?2",
+            params![app_type, provider_id],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn get_provider_key_summaries(
         &self,
         app_type: &str,

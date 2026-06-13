@@ -50,7 +50,10 @@ pub use mcp::{
     sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
-pub use provider::{Provider, ProviderKey, ProviderKeyInput, ProviderKeyStatus, ProviderMeta};
+pub use provider::{
+    Provider, ProviderConfigKeyBinding, ProviderKey, ProviderKeyInput, ProviderKeyStatus,
+    ProviderMeta,
+};
 pub use services::{
     skill::{migrate_skills_to_ssot, ImportSkillSelection},
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
