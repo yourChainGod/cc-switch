@@ -2260,8 +2260,18 @@ impl SkillService {
         }
 
         let bytes = response.bytes().await?;
-        let cursor = std::io::Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor)?;
+        Self::extract_zip_stripping_root(std::io::Cursor::new(bytes), dest)
+    }
+
+    /// 解压 ZIP 到目标目录，并剥离顶层目录前缀（GitHub 归档会包一层 `repo-branch/`）。
+    ///
+    /// 使用 `enclosed_name()` 做路径安全校验（与 `extract_local_zip` 对齐），
+    /// 防止 zip-slip：含 `..`、绝对路径等非法路径的条目跳过并告警。
+    fn extract_zip_stripping_root<R: std::io::Read + std::io::Seek>(
+        reader: R,
+        dest: &Path,
+    ) -> Result<()> {
+        let mut archive = zip::ZipArchive::new(reader)?;
 
         let root_name = if !archive.is_empty() {
             let first_file = archive.by_index(0)?;
@@ -2280,16 +2290,31 @@ impl SkillService {
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            let file_path = file.name().to_string();
 
-            let relative_path =
-                if let Some(stripped) = file_path.strip_prefix(&format!("{root_name}/")) {
-                    stripped
-                } else {
+            // 防 zip-slip：enclosed_name() 拒绝绝对路径与逃逸 ZIP 根的条目。
+            // 它允许"未逃逸 ZIP 根"的 `..`（如 a/../b），但本函数随后要剥离
+            // 顶层目录前缀，残留的 `..` 仍可能逃逸 dest，因此一并拒绝
+            let safe_path = match file.enclosed_name() {
+                Some(path)
+                    if !path
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir)) =>
+                {
+                    path.to_owned()
+                }
+                _ => {
+                    log::warn!("跳过 ZIP 中的非法路径条目: {}", file.name());
                     continue;
-                };
+                }
+            };
 
-            if relative_path.is_empty() {
+            // 剥离顶层目录前缀；不在顶层目录下的条目跳过（保持原有语义）
+            let relative_path = match safe_path.strip_prefix(&root_name) {
+                Ok(stripped) => stripped,
+                Err(_) => continue,
+            };
+
+            if relative_path.as_os_str().is_empty() {
                 continue;
             }
 
@@ -3067,6 +3092,56 @@ mod tests {
             format!("---\nname: {name}\ndescription: Test skill\n---\n"),
         )
         .expect("write SKILL.md");
+    }
+
+    #[test]
+    fn extract_zip_stripping_root_skips_zip_slip_entries() {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        // 在内存中构造恶意 ZIP：正常条目 + 两个企图逃逸目标目录的条目
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            let options = SimpleFileOptions::default();
+
+            writer
+                .start_file("skill-main/SKILL.md", options)
+                .expect("start normal entry");
+            writer.write_all(b"# demo").expect("write normal entry");
+
+            // zip-slip：剥离顶层前缀后为 ../evil.txt，旧实现会写到 dest 之外
+            writer
+                .start_file("skill-main/../evil.txt", options)
+                .expect("start traversal entry");
+            writer.write_all(b"evil").expect("write traversal entry");
+
+            writer
+                .start_file("../evil2.txt", options)
+                .expect("start bare traversal entry");
+            writer
+                .write_all(b"evil")
+                .expect("write bare traversal entry");
+
+            writer.finish().expect("finish zip");
+        }
+        buf.set_position(0);
+
+        let temp = tempdir().expect("tempdir");
+        let dest = temp.path().join("extract");
+        fs::create_dir_all(&dest).expect("create dest");
+
+        // 非法条目应被跳过，函数本身不报错（与 extract_local_zip 行为对齐）
+        SkillService::extract_zip_stripping_root(buf, &dest).expect("extract should succeed");
+
+        // 正常条目解压成功
+        assert!(dest.join("SKILL.md").is_file());
+        // 目标目录之外没有任何逃逸文件（旧实现会写出 temp/evil.txt）
+        assert!(!temp.path().join("evil.txt").exists());
+        assert!(!temp.path().join("evil2.txt").exists());
+        // 目标目录内也不应出现这些条目
+        assert!(!dest.join("evil.txt").exists());
+        assert!(!dest.join("evil2.txt").exists());
     }
 
     #[test]

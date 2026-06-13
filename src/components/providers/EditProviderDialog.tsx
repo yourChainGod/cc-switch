@@ -19,6 +19,7 @@ import {
   type ProviderKeyPoolController,
 } from "@/components/providers/keyPool/ProviderKeyPoolDialog";
 import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
+import { isAdditiveApp } from "@/config/additiveApps";
 
 interface EditProviderDialogProps {
   open: boolean;
@@ -357,9 +358,10 @@ export function EditProviderDialog({
         string,
         unknown
       >;
+      // providerKey 型应用（OpenCode/OpenClaw/Hermes）：providerKey 即主键 ID，
+      // 编辑未锁定的供应商时允许通过修改 providerKey 重命名 ID
       const nextProviderId =
-        (appId === "opencode" || appId === "openclaw") &&
-        values.providerKey?.trim()
+        isAdditiveApp(appId) && values.providerKey?.trim()
           ? values.providerKey.trim()
           : activeProvider.id;
 

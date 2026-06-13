@@ -149,8 +149,9 @@ export function ProviderList({
   // 故障转移相关
   const { data: isAutoFailoverEnabled } = useAutoFailoverEnabled(appId);
   const { data: failoverQueue } = useFailoverQueue(appId);
-  const addToQueue = useAddToFailoverQueue();
-  const removeFromQueue = useRemoveFromFailoverQueue();
+  // 只取 mutate（v5 中引用稳定），避免 mutation 对象每次渲染变化导致回调失稳
+  const { mutate: addToFailoverQueue } = useAddToFailoverQueue();
+  const { mutate: removeFromFailoverQueue } = useRemoveFromFailoverQueue();
   const { data: providerKeySummaries = [] } = useQuery({
     queryKey: ["providerKeySummaries", appId],
     queryFn: () => providersApi.getKeySummaries(appId),
@@ -193,12 +194,12 @@ export function ProviderList({
   const handleToggleFailover = useCallback(
     (providerId: string, enabled: boolean) => {
       if (enabled) {
-        addToQueue.mutate({ appType: appId, providerId });
+        addToFailoverQueue({ appType: appId, providerId });
       } else {
-        removeFromQueue.mutate({ appType: appId, providerId });
+        removeFromFailoverQueue({ appType: appId, providerId });
       }
     },
-    [appId, addToQueue, removeFromQueue],
+    [appId, addToFailoverQueue, removeFromFailoverQueue],
   );
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -460,9 +461,7 @@ export function ProviderList({
                 failoverPriority={getFailoverPriority(provider.id)}
                 isInFailoverQueue={isInFailoverQueue(provider.id)}
                 keySummary={providerKeySummaryMap.get(provider.id)}
-                onToggleFailover={(enabled) =>
-                  handleToggleFailover(provider.id, enabled)
-                }
+                onToggleFailover={handleToggleFailover}
                 activeProviderId={activeProviderId}
                 // OpenClaw: default model / Hermes: model.provider === provider.id
                 isDefaultModel={
@@ -470,9 +469,7 @@ export function ProviderList({
                     ? isHermesCurrent
                     : isProviderDefaultModel(provider.id)
                 }
-                onSetAsDefault={
-                  onSetAsDefault ? () => onSetAsDefault(provider) : undefined
-                }
+                onSetAsDefault={onSetAsDefault}
               />
             );
           })}
@@ -613,12 +610,15 @@ interface SortableProviderCardProps {
   failoverPriority?: number;
   isInFailoverQueue: boolean;
   keySummary?: ProviderKeySummary;
-  onToggleFailover: (enabled: boolean) => void;
+  onToggleFailover: (providerId: string, enabled: boolean) => void;
   activeProviderId?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
-  onSetAsDefault?: () => void;
+  onSetAsDefault?: (provider: Provider) => void;
 }
+
+// 无配置用量回调时的稳定 no-op，避免每次渲染新建闭包击穿 ProviderCard 的 memo
+const noopConfigureUsage = () => undefined;
 
 function SortableProviderCard({
   provider,
@@ -664,6 +664,23 @@ function SortableProviderCard({
     transition,
   };
 
+  // 以下 props 稳定化均为配合 ProviderCard 的 React.memo：
+  // 避免每次渲染创建新对象/闭包导致 memo 失效
+  const dragHandleProps = useMemo(
+    () => ({ attributes, listeners, isDragging }),
+    [attributes, listeners, isDragging],
+  );
+
+  const handleToggleFailover = useCallback(
+    (enabled: boolean) => onToggleFailover(provider.id, enabled),
+    [onToggleFailover, provider.id],
+  );
+
+  const handleSetAsDefault = useMemo(
+    () => (onSetAsDefault ? () => onSetAsDefault(provider) : undefined),
+    [onSetAsDefault, provider],
+  );
+
   return (
     <div ref={setNodeRef} style={style}>
       <ProviderCard
@@ -680,29 +697,23 @@ function SortableProviderCard({
         onDisableOmo={onDisableOmo}
         onDisableOmoSlim={onDisableOmoSlim}
         onDuplicate={onDuplicate}
-        onConfigureUsage={
-          onConfigureUsage ? (item) => onConfigureUsage(item) : () => undefined
-        }
+        onConfigureUsage={onConfigureUsage ?? noopConfigureUsage}
         onOpenWebsite={onOpenWebsite}
         onOpenTerminal={onOpenTerminal}
         onTest={onTest}
         isTesting={isTesting}
         isProxyRunning={isProxyRunning}
         isProxyTakeover={isProxyTakeover}
-        dragHandleProps={{
-          attributes,
-          listeners,
-          isDragging,
-        }}
+        dragHandleProps={dragHandleProps}
         isAutoFailoverEnabled={isAutoFailoverEnabled}
         failoverPriority={failoverPriority}
         isInFailoverQueue={isInFailoverQueue}
         keySummary={keySummary}
-        onToggleFailover={onToggleFailover}
+        onToggleFailover={handleToggleFailover}
         activeProviderId={activeProviderId}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
-        onSetAsDefault={onSetAsDefault}
+        onSetAsDefault={handleSetAsDefault}
       />
     </div>
   );

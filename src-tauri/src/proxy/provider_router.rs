@@ -214,16 +214,30 @@ impl ProviderRouter {
             return Ok(());
         };
 
-        let Some(index) = attempts.iter().position(|attempt| {
+        if !attempts.iter().any(|attempt| {
             attempt.provider.id == binding.provider_id && attempt.key_id == binding.key_id
-        }) else {
+        }) {
             return Ok(());
-        };
-
-        if index > 0 {
-            let attempt = attempts.remove(index);
-            attempts.insert(0, attempt);
         }
+
+        // 整组前移：把命中 provider 的全部 key 通道一起挪到队首（命中 key 在
+        // 组首，其余保持原有相对顺序）。只置顶单个 attempt 会把同 provider 的
+        // 兄弟 key 留在原位，产生 [A:k2, B, A:k1] 的交错顺序 —— forwarder
+        // 顺序遍历下要么 B 插在 A 的 key 重试之间、要么 B 被跳过后永不回头。
+        let (mut group, rest): (Vec<_>, Vec<_>) = std::mem::take(attempts)
+            .into_iter()
+            .partition(|attempt| attempt.provider.id == binding.provider_id);
+        if let Some(bound_index) = group
+            .iter()
+            .position(|attempt| attempt.key_id == binding.key_id)
+        {
+            if bound_index > 0 {
+                let bound = group.remove(bound_index);
+                group.insert(0, bound);
+            }
+        }
+        attempts.extend(group);
+        attempts.extend(rest);
         Ok(())
     }
 
@@ -1258,6 +1272,77 @@ mod tests {
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].key_id.as_deref(), Some(key_1.id.as_str()));
         assert_eq!(attempts[1].key_id.as_deref(), Some(key_2.id.as_str()));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_session_affinity_moves_whole_provider_group_to_front() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let mut provider_a =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        provider_a.sort_index = Some(1);
+        let mut provider_b =
+            Provider::with_id("b".to_string(), "Provider B".to_string(), json!({}), None);
+        provider_b.sort_index = Some(2);
+
+        db.save_provider("claude", &provider_a).unwrap();
+        db.save_provider("claude", &provider_b).unwrap();
+        db.add_to_failover_queue("claude", "a").unwrap();
+        db.add_to_failover_queue("claude", "b").unwrap();
+
+        let key_a1 = db
+            .add_provider_key(
+                "claude",
+                "a",
+                &crate::provider::ProviderKeyInput {
+                    name: "a-key-1".to_string(),
+                    key_value: "sk-a-1".to_string(),
+                    auth_field: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+                    enabled: true,
+                    priority: 10,
+                    weight: 1,
+                },
+            )
+            .unwrap();
+        let key_a2 = db
+            .add_provider_key(
+                "claude",
+                "a",
+                &crate::provider::ProviderKeyInput {
+                    name: "a-key-2".to_string(),
+                    key_value: "sk-a-2".to_string(),
+                    auth_field: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+                    enabled: true,
+                    priority: 20,
+                    weight: 1,
+                },
+            )
+            .unwrap();
+        // 亲和绑定到 A 的次序靠后的 key：若只置顶单个 attempt，
+        // 顺序会变成 [A:k2, B, A:k1]，forwarder 顺序遍历下 B 会插在
+        // A 的两个 key 之间（或被旧 pending 机制永久跳过）。
+        db.upsert_session_affinity("claude", "session-1", "a", Some(&key_a2.id))
+            .unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let attempts = router
+            .select_providers_for_session("claude", Some("session-1"))
+            .await
+            .unwrap();
+
+        // 整组前移：A 的全部 key 通道（绑定 key 在组首）→ 然后才是 B
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[0].provider.id, "a");
+        assert_eq!(attempts[0].key_id.as_deref(), Some(key_a2.id.as_str()));
+        assert_eq!(attempts[1].provider.id, "a");
+        assert_eq!(attempts[1].key_id.as_deref(), Some(key_a1.id.as_str()));
+        assert_eq!(attempts[2].provider.id, "b");
     }
 
     #[tokio::test]

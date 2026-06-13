@@ -7,6 +7,7 @@ import type { SwitchResult } from "@/lib/api/providers";
 import type { Provider, SessionMeta, Settings } from "@/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { generateUUID } from "@/utils/uuid";
+import { isAdditiveApp } from "@/config/additiveApps";
 import { openclawKeys } from "@/hooks/useOpenClaw";
 import { invalidateHermesProviderCaches } from "@/hooks/useHermes";
 
@@ -41,7 +42,8 @@ export const useAddProviderMutation = (appId: AppId) => {
 
       let id: string;
 
-      if (appId === "opencode" || appId === "openclaw" || appId === "hermes") {
+      // providerKey 型应用（OpenCode/OpenClaw/Hermes）：用 providerKey 作为主键 ID
+      if (isAdditiveApp(appId)) {
         if (
           providerInput.category === "omo" ||
           providerInput.category === "omo-slim"

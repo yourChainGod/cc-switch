@@ -38,23 +38,43 @@ const APP_DIRECTORY_META: Record<
   hermes: { key: "hermes", defaultFolder: ".hermes" },
 };
 
-const DIRECTORY_KEY_TO_SETTINGS_FIELD: Record<
-  AppDirectoryKey,
-  keyof SettingsFormState
-> = {
+// 目录 key -> Settings 表单字段的唯一映射表。
+// 所有需要遍历"每个应用的配置目录字段"的逻辑（trim/sanitize、变更检测、重置）
+// 都应基于该表做表驱动，禁止手写字段清单（曾因此漏掉 hermes）。
+export const DIRECTORY_KEY_TO_SETTINGS_FIELD = {
   claude: "claudeConfigDir",
   codex: "codexConfigDir",
   gemini: "geminiConfigDir",
   opencode: "opencodeConfigDir",
   openclaw: "openclawConfigDir",
   hermes: "hermesConfigDir",
-};
+} as const satisfies Record<AppDirectoryKey, keyof SettingsFormState>;
+
+export type DirectorySettingsField =
+  (typeof DIRECTORY_KEY_TO_SETTINGS_FIELD)[AppDirectoryKey];
+
+export const DIRECTORY_SETTINGS_FIELDS: readonly DirectorySettingsField[] =
+  Object.values(DIRECTORY_KEY_TO_SETTINGS_FIELD);
 
 const sanitizeDir = (value?: string | null): string | undefined => {
   if (!value) return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 };
+
+/** 表驱动地对所有目录字段做 trim/sanitize，返回可直接 spread 进 Settings 的片段 */
+export const sanitizeDirectorySettingsFields = (
+  source:
+    | Partial<Pick<SettingsFormState, DirectorySettingsField>>
+    | null
+    | undefined,
+): Pick<SettingsFormState, DirectorySettingsField> =>
+  Object.fromEntries(
+    DIRECTORY_SETTINGS_FIELDS.map((field) => [
+      field,
+      sanitizeDir(source?.[field]),
+    ]),
+  ) as Pick<SettingsFormState, DirectorySettingsField>;
 
 const computeDefaultAppConfigDir = async (): Promise<string | undefined> => {
   try {

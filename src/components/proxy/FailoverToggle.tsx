@@ -10,7 +10,7 @@ import {
   useAutoFailoverEnabled,
   useSetAutoFailoverEnabled,
 } from "@/lib/query/failover";
-import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useProxyTakeoverStatus } from "@/hooks/useProxyStatus";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
@@ -25,7 +25,8 @@ export function FailoverToggle({ className, activeApp }: FailoverToggleProps) {
   const { data: isEnabled = false, isLoading } =
     useAutoFailoverEnabled(activeApp);
   const setEnabled = useSetAutoFailoverEnabled();
-  const { takeoverStatus } = useProxyStatus();
+  // 只订阅接管状态：避免随 proxyStatus 2s 轮询一起重渲染
+  const { data: takeoverStatus } = useProxyTakeoverStatus();
   const takeoverEnabled = takeoverStatus?.[activeApp] ?? false;
 
   const handleToggle = (checked: boolean) => {

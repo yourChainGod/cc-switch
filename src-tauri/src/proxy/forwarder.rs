@@ -114,6 +114,10 @@ pub struct RequestForwarder {
     /// `max_attempts = max_retries + 1`，所以 max_retries=0 表示仅尝试一家、
     /// max_retries=3（默认）表示最多 4 家。loop 同时受 providers.len() 自然限制。
     max_attempts: usize,
+    /// anyrouter 429 同通道重试预算（次数 / 总等待毫秒）。
+    /// 刻意不受 max_attempts/max_retries 约束，常量给足；字段化仅为测试可覆写。
+    anyrouter_429_max_retries: usize,
+    anyrouter_429_total_wait_ms: u64,
 }
 
 impl RequestForwarder {
@@ -202,6 +206,8 @@ impl RequestForwarder {
                 streaming_first_byte_timeout,
             ),
             max_attempts,
+            anyrouter_429_max_retries: ANYROUTER_RATE_LIMIT_MAX_RETRIES,
+            anyrouter_429_total_wait_ms: ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS,
         }
     }
 
@@ -269,41 +275,9 @@ impl RequestForwarder {
         app_type: &str,
         used_half_open_permit: bool,
     ) {
-        if let Err(e) = self
-            .router
-            .bind_working_channel_affinity(app_type, provider_id, key_id)
-            .await
-        {
-            log::warn!(
-                "[{app_type}] 记录工作通道偏好失败: provider_id={provider_id}, key_id={key_id:?}, error={e}"
-            );
-        }
-
-        if self.session_client_provided {
-            if let Err(e) = self
-                .router
-                .bind_session_affinity(app_type, &self.session_id, provider_id, key_id)
-                .await
-            {
-                log::warn!(
-                    "[{app_type}] 记录 Session Affinity 失败: provider_id={provider_id}, key_id={key_id:?}, session_id={}, error={e}",
-                    self.session_id
-                );
-            }
-        }
-
-        if let Some(key_id) = key_id {
-            if let Err(e) = self
-                .router
-                .record_key_success(provider_id, app_type, key_id)
-                .await
-            {
-                log::warn!(
-                    "[{app_type}] 记录 Provider Key 成功结果失败: provider_id={provider_id}, key_id={key_id}, error={e}"
-                );
-            }
-        }
-
+        // HalfOpen permit 释放必须同步完成：它归还熔断器的探测名额并推进
+        // HalfOpen → Closed 状态机，挪到后台会让紧随其后的请求误判通道仍在
+        // 探测中而被拒绝。
         if used_half_open_permit {
             if let Err(e) = self
                 .router
@@ -314,28 +288,65 @@ impl RequestForwarder {
                     "[{app_type}] 记录 Provider 成功结果失败: provider_id={provider_id}, error={e}"
                 );
             }
-            return;
         }
 
+        // 其余记账（亲和绑定、key 成功、通道健康度）都是事后簿记，不影响本次
+        // 响应的正确性 —— 整体挪到后台，避免 2-3 次同步 DB 写叠加在流式响应
+        // 的首包延迟上。
         let router = self.router.clone();
         let provider_id = provider_id.to_string();
         let key_id = key_id.map(str::to_string);
         let app_type = app_type.to_string();
+        let session_id = self.session_id.clone();
+        let session_client_provided = self.session_client_provided;
         tokio::spawn(async move {
             if let Err(e) = router
-                .record_channel_result(
-                    &provider_id,
-                    key_id.as_deref(),
-                    &app_type,
-                    false,
-                    true,
-                    None,
-                )
+                .bind_working_channel_affinity(&app_type, &provider_id, key_id.as_deref())
                 .await
             {
                 log::warn!(
-                    "[{app_type}] 异步记录 Provider 成功结果失败: provider_id={provider_id}, error={e}"
+                    "[{app_type}] 记录工作通道偏好失败: provider_id={provider_id}, key_id={key_id:?}, error={e}"
                 );
+            }
+
+            if session_client_provided {
+                if let Err(e) = router
+                    .bind_session_affinity(&app_type, &session_id, &provider_id, key_id.as_deref())
+                    .await
+                {
+                    log::warn!(
+                        "[{app_type}] 记录 Session Affinity 失败: provider_id={provider_id}, key_id={key_id:?}, session_id={session_id}, error={e}"
+                    );
+                }
+            }
+
+            if let Some(key_id) = key_id.as_deref() {
+                if let Err(e) = router
+                    .record_key_success(&provider_id, &app_type, key_id)
+                    .await
+                {
+                    log::warn!(
+                        "[{app_type}] 记录 Provider Key 成功结果失败: provider_id={provider_id}, key_id={key_id}, error={e}"
+                    );
+                }
+            }
+
+            if !used_half_open_permit {
+                if let Err(e) = router
+                    .record_channel_result(
+                        &provider_id,
+                        key_id.as_deref(),
+                        &app_type,
+                        false,
+                        true,
+                        None,
+                    )
+                    .await
+                {
+                    log::warn!(
+                        "[{app_type}] 异步记录 Provider 成功结果失败: provider_id={provider_id}, error={e}"
+                    );
+                }
             }
         });
     }
@@ -556,7 +567,10 @@ impl RequestForwarder {
         let mut attempted_channels = 0usize;
         let mut attempted_channel_ids = HashSet::new();
         let mut provider_blocked_by_failure = HashSet::new();
-        let mut pending_key_retry_provider_id: Option<String> = None;
+        // anyrouter 429 同通道重试预算：独立于 max_retries 设置，整个请求内共享
+        //（多 key 轮转时各 key 的原地重试共用同一份预算，防止预算被放大 N 倍）。
+        let mut anyrouter_429_retry_budget = self.anyrouter_429_max_retries;
+        let mut anyrouter_429_wait_budget_ms = self.anyrouter_429_total_wait_ms;
 
         let total_channel_count = providers
             .iter()
@@ -568,21 +582,12 @@ impl RequestForwarder {
 
         // 依次尝试每个供应商 / Key。预算按通道去重统计；
         // 有 key 池时，每个 key 与单独 Provider 一样占用一次尝试预算。
-        for (attempt_index, attempt) in providers.iter().enumerate() {
+        for attempt in providers.iter() {
             let provider = &attempt.provider;
             let key_id = attempt.key_id.as_deref();
             let channel_id = attempt.channel_id();
             if provider_blocked_by_failure.contains(&provider.id) {
                 continue;
-            }
-            if pending_key_retry_provider_id
-                .as_deref()
-                .is_some_and(|pending_id| pending_id != provider.id.as_str())
-            {
-                continue;
-            }
-            if pending_key_retry_provider_id.as_deref() == Some(provider.id.as_str()) {
-                pending_key_retry_provider_id = None;
             }
             // 整流器重试标记：每个 provider 独立持有，避免标记跨 provider 短路故障转移
             // —— 首家 provider 整流后被 5xx/timeout 击落时，下家仍能用整流后的请求体走整流流程
@@ -593,10 +598,6 @@ impl RequestForwarder {
 
             // 上限检查：尊重用户在 AppProxyConfig.max_retries 上配置的「重试次数」。
             // 放在熔断器 allow 检查之前，避免在已经超限时还占用 HalfOpen 探测名额。
-            let remaining_same_provider_key = providers[attempt_index + 1..]
-                .iter()
-                .any(|next| next.provider.id == provider.id && next.key_id.is_some());
-
             let is_new_channel_attempt = !attempted_channel_ids.contains(&channel_id);
             let beyond_max_attempts =
                 is_new_channel_attempt && attempted_channels >= self.max_attempts;
@@ -728,7 +729,85 @@ impl RequestForwarder {
                         connection_guard: None,
                     });
                 }
-                Err(e) => {
+                Err(mut e) => {
+                    // anyrouter 429 限流特判：同通道高强度重试，预算独立于
+                    // AppProxyConfig.max_retries（该设置只管"换几家"，不管这里）。
+                    // 重试间隔尊重上游 Retry-After（封顶），否则短退避线性爬升。
+                    // anyrouter 限流是分钟级窗口 + 后端轮转，冷却/熔断只会把
+                    // 大概率马上恢复的通道踢出轮转，因此全程不标记冷却。
+                    let is_anyrouter = is_anyrouter_channel(
+                        &provider.name,
+                        &adapter.extract_base_url(provider).unwrap_or_default(),
+                    );
+                    if is_anyrouter && is_rate_limited_upstream_error(&e) {
+                        let mut retry_round: u64 = 0;
+                        while anyrouter_429_retry_budget > 0 && is_rate_limited_upstream_error(&e)
+                        {
+                            let wait_ms = match &e {
+                                ProxyError::UpstreamError {
+                                    retry_after: Some(ra),
+                                    ..
+                                } => ra
+                                    .saturating_mul(1000)
+                                    .min(ANYROUTER_RATE_LIMIT_RETRY_AFTER_CAP_SECS * 1000),
+                                _ => (ANYROUTER_RATE_LIMIT_RETRY_BASE_MS * (retry_round + 1))
+                                    .min(ANYROUTER_RATE_LIMIT_RETRY_MAX_MS),
+                            };
+                            if wait_ms > anyrouter_429_wait_budget_ms {
+                                log::warn!(
+                                    "[{app_type_str}] [anyrouter] 429 重试等待预算耗尽，转入故障转移: provider={}",
+                                    provider.name
+                                );
+                                break;
+                            }
+                            anyrouter_429_wait_budget_ms -= wait_ms;
+                            anyrouter_429_retry_budget -= 1;
+                            retry_round += 1;
+                            log::info!(
+                                "[{app_type_str}] [anyrouter] 上游 429 限流，{wait_ms}ms 后同通道重试（第 {retry_round} 次，剩余预算 {anyrouter_429_retry_budget}）: provider={}",
+                                provider.name
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+
+                            match self
+                                .forward(
+                                    app_type,
+                                    &method,
+                                    provider,
+                                    endpoint,
+                                    &provider_body,
+                                    &headers,
+                                    &extensions,
+                                    adapter.as_ref(),
+                                )
+                                .await
+                            {
+                                Ok((response, claude_api_format)) => {
+                                    log::info!(
+                                        "[{app_type_str}] [anyrouter] 429 重试成功（共重试 {retry_round} 次）: provider={}",
+                                        provider.name
+                                    );
+                                    return Ok(self
+                                        .finalize_same_provider_retry_success(
+                                            response,
+                                            claude_api_format,
+                                            provider,
+                                            attempt.key_id.clone(),
+                                            key_id,
+                                            app_type_str,
+                                            used_half_open_permit,
+                                        )
+                                        .await);
+                                }
+                                Err(retry_err) => {
+                                    e = retry_err;
+                                }
+                            }
+                        }
+                        // 仍是 429：落入下方通用分类，但不标记冷却（见
+                        // skip_failure_marking）；变成其他错误则按正常轨道处理。
+                    }
+
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
                     let is_anthropic_provider = matches!(
@@ -812,8 +891,6 @@ impl RequestForwarder {
                                     }
                                     if key_id.is_none() {
                                         provider_blocked_by_failure.insert(provider.id.clone());
-                                    } else if remaining_same_provider_key {
-                                        pending_key_retry_provider_id = Some(provider.id.clone());
                                     }
                                     continue;
                                 }
@@ -888,8 +965,6 @@ impl RequestForwarder {
                                     }
                                     if key_id.is_none() {
                                         provider_blocked_by_failure.insert(provider.id.clone());
-                                    } else if remaining_same_provider_key {
-                                        pending_key_retry_provider_id = Some(provider.id.clone());
                                     }
                                     continue;
                                 }
@@ -1047,9 +1122,6 @@ impl RequestForwarder {
                                         if key_id.is_none() {
                                             provider_blocked_by_failure
                                                 .insert(provider.id.clone());
-                                        } else if remaining_same_provider_key {
-                                            pending_key_retry_provider_id =
-                                                Some(provider.id.clone());
                                         }
                                         continue;
                                     }
@@ -1219,8 +1291,6 @@ impl RequestForwarder {
                                     }
                                     if key_id.is_none() {
                                         provider_blocked_by_failure.insert(provider.id.clone());
-                                    } else if remaining_same_provider_key {
-                                        pending_key_retry_provider_id = Some(provider.id.clone());
                                     }
                                     continue;
                                 }
@@ -1257,6 +1327,9 @@ impl RequestForwarder {
                     //    不应污染熔断器和数据库健康度（与 release_permit_neutral 同语义）。
                     let category = self.categorize_proxy_error(&e);
                     let key_scoped_retry = key_id.is_some() && is_key_scoped_error(&e);
+                    // anyrouter 429：限流不是通道/key 故障，不计入冷却与熔断健康度，
+                    // 也不清除亲和（下一请求应继续优先命中该通道）。
+                    let skip_failure_marking = is_anyrouter && is_rate_limited_upstream_error(&e);
 
                     match category {
                         ErrorCategory::Retryable if key_id.is_some() => {
@@ -1271,8 +1344,20 @@ impl RequestForwarder {
                                     used_half_open_permit,
                                 )
                                 .await;
-                            self.record_key_failure_for_error(provider, key_id, app_type_str, &e)
+                            if skip_failure_marking {
+                                log::info!(
+                                    "[{app_type_str}] [anyrouter] 429 不计入 key 冷却: provider={}, key_id={key_id:?}",
+                                    provider.name
+                                );
+                            } else {
+                                self.record_key_failure_for_error(
+                                    provider,
+                                    key_id,
+                                    app_type_str,
+                                    &e,
+                                )
                                 .await;
+                            }
                             {
                                 let mut status = self.status.write().await;
                                 status.last_error =
@@ -1281,24 +1366,37 @@ impl RequestForwarder {
                             last_error = Some(e);
                             last_provider = Some(provider.clone());
                             last_key_id = attempt.key_id.clone();
-                            if remaining_same_provider_key {
-                                pending_key_retry_provider_id = Some(provider.id.clone());
-                            }
                             continue;
                         }
                         ErrorCategory::Retryable => {
                             // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
-                            let _ = self
-                                .router
-                                .record_channel_result(
-                                    &provider.id,
-                                    key_id,
-                                    app_type_str,
-                                    used_half_open_permit,
-                                    false,
-                                    Some(e.to_string()),
-                                )
-                                .await;
+                            //（anyrouter 429 例外：限流不是通道故障，仅中性释放 permit）
+                            if skip_failure_marking {
+                                log::info!(
+                                    "[{app_type_str}] [anyrouter] 429 不计入通道冷却/熔断: provider={}",
+                                    provider.name
+                                );
+                                self.router
+                                    .release_channel_permit_neutral(
+                                        &provider.id,
+                                        key_id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                    )
+                                    .await;
+                            } else {
+                                let _ = self
+                                    .router
+                                    .record_channel_result(
+                                        &provider.id,
+                                        key_id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                        false,
+                                        Some(e.to_string()),
+                                    )
+                                    .await;
+                            }
 
                             {
                                 let mut status = self.status.write().await;
@@ -1340,9 +1438,6 @@ impl RequestForwarder {
                             last_error = Some(e);
                             last_provider = Some(provider.clone());
                             last_key_id = attempt.key_id.clone();
-                            if remaining_same_provider_key {
-                                pending_key_retry_provider_id = Some(provider.id.clone());
-                            }
                             continue;
                         }
                         ErrorCategory::NonRetryable | ErrorCategory::ClientAbort => {
@@ -2444,6 +2539,26 @@ const ANYROUTER_KNOWN_HOSTS: &[&str] = &["anyrouter.top", "a-ocnfniawgw.cn-shang
 /// anyrouter 要求显式携带的 1M 上下文 beta flag（ccLoad 同款适配）。
 const ANYROUTER_CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
+/// anyrouter 429 限流的同通道重试预算（每个客户端请求共享，跨 key 计数）。
+///
+/// anyrouter 的 429 来自分钟级滚动窗口 + 后端账号轮转，稍候重试大概率
+/// 落到可用后端，因此预算刻意不受 AppProxyConfig.max_retries 约束、给足量；
+/// 同时 429 不计入 key/通道冷却与熔断健康度（见 forward_with_retry_inner）。
+const ANYROUTER_RATE_LIMIT_MAX_RETRIES: usize = 50;
+/// anyrouter 429 重试间隔：线性爬升（250ms、500ms、…）封顶 2.5s；
+/// 上游显式 Retry-After 优先，单次封顶 30s。
+const ANYROUTER_RATE_LIMIT_RETRY_BASE_MS: u64 = 250;
+const ANYROUTER_RATE_LIMIT_RETRY_MAX_MS: u64 = 2_500;
+const ANYROUTER_RATE_LIMIT_RETRY_AFTER_CAP_SECS: u64 = 30;
+/// anyrouter 429 重试的总等待预算（纯 sleep 时间，不含请求本身耗时），
+/// 防止上游持续回大 Retry-After 时把单个请求挂死。
+const ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS: u64 = 120_000;
+
+/// 上游 429 限流错误（anyrouter 特判用）。
+fn is_rate_limited_upstream_error(error: &ProxyError) -> bool {
+    matches!(error, ProxyError::UpstreamError { status: 429, .. })
+}
+
 fn is_anyrouter_channel(provider_name: &str, base_url: &str) -> bool {
     if provider_name.to_ascii_lowercase().contains("anyrouter") {
         return true;
@@ -2544,24 +2659,27 @@ fn is_key_scoped_error(error: &ProxyError) -> bool {
     match error {
         ProxyError::AuthError(_) => true,
         ProxyError::UpstreamError { status, body, .. } => {
-            matches!(*status, 401 | 403 | 429)
-                || body
-                    .as_deref()
-                    .map(|body| {
-                        let lower = body.to_ascii_lowercase();
-                        lower.contains("invalid_api_key")
-                            || lower.contains("invalid api key")
-                            || lower.contains("api key")
-                            || lower.contains("unauthorized")
-                            || lower.contains("forbidden")
-                            || lower.contains("quota")
-                            || lower.contains("rate limit")
-                            || lower.contains("rate_limit")
-                            || lower.contains("insufficient")
-                            || lower.contains("balance")
-                            || lower.contains("credit")
-                    })
-                    .unwrap_or(false)
+            // key 维度状态码：401/403 认证、402 计费、429 限流 —— 换 key 通常有效
+            if matches!(*status, 401 | 402 | 403 | 429) {
+                return true;
+            }
+            // 其他状态码（含 NonRetryable 的 400/422 等）仅在 body 明确指向
+            // API key 本身时才算 key 维度问题。不能用 "quota"/"balance"/
+            // "credit"/"unauthorized" 等宽泛词：400 "max_tokens exceeds your
+            // credit plan limit" 这类请求错误会被误判成 key 失效，
+            // 换 key 重试 + 冷却逐个打满整个 key 池。
+            body.as_deref()
+                .map(|body| {
+                    let lower = body.to_ascii_lowercase();
+                    lower.contains("invalid_api_key")
+                        || lower.contains("invalid api key")
+                        || lower.contains("incorrect api key")
+                        || lower.contains("api key not valid")
+                        || lower.contains("api key expired")
+                        || lower.contains("api_key_invalid")
+                        || lower.contains("account_deactivated")
+                })
+                .unwrap_or(false)
         }
         _ => false,
     }
@@ -2908,6 +3026,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn key_scoped_error_matches_key_dimension_statuses() {
+        assert!(is_key_scoped_error(&ProxyError::AuthError("bad".into())));
+        for status in [401, 402, 403, 429] {
+            assert!(
+                is_key_scoped_error(&upstream_error(status, None, None)),
+                "status {status} should be key-scoped"
+            );
+        }
+    }
+
+    #[test]
+    fn key_scoped_error_rejects_generic_client_errors() {
+        // 400 "credit plan limit" 是请求维度问题（max_tokens 超限），不是 key 失效；
+        // 旧版宽泛词 "credit"/"quota"/"balance" 会把这类错误误判成换 key 可解。
+        assert!(!is_key_scoped_error(&upstream_error(
+            400,
+            Some("max_tokens exceeds your credit plan limit"),
+            None
+        )));
+        assert!(!is_key_scoped_error(&upstream_error(
+            422,
+            Some("quota of tools exceeded"),
+            None
+        )));
+        assert!(!is_key_scoped_error(&upstream_error(
+            500,
+            Some("internal balance service error"),
+            None
+        )));
+        assert!(!is_key_scoped_error(&upstream_error(404, None, None)));
+        assert!(!is_key_scoped_error(&ProxyError::Timeout("t".into())));
+    }
+
+    #[test]
+    fn key_scoped_error_accepts_explicit_key_phrases_on_other_statuses() {
+        assert!(is_key_scoped_error(&upstream_error(
+            400,
+            Some(r#"{"error":{"code":"invalid_api_key","message":"bad key"}}"#),
+            None
+        )));
+        assert!(is_key_scoped_error(&upstream_error(
+            400,
+            Some("API key not valid. Please pass a valid API key."),
+            None
+        )));
+    }
+
     fn test_provider() -> Provider {
         Provider {
             id: "provider-1".to_string(),
@@ -2955,6 +3121,8 @@ mod tests {
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
+            anyrouter_429_max_retries: ANYROUTER_RATE_LIMIT_MAX_RETRIES,
+            anyrouter_429_total_wait_ms: ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS,
         }
     }
 
@@ -2978,6 +3146,48 @@ mod tests {
         } else {
             (StatusCode::OK, r#"{"ok":true}"#)
         }
+    }
+
+    /// 前两次请求回 429，之后回 200（anyrouter 限流重试用）。
+    async fn anyrouter_rate_limit_mock_handler(
+        State(seen_auth): State<Arc<Mutex<Vec<String>>>>,
+        headers: HeaderMap,
+        _body: Bytes,
+    ) -> (StatusCode, &'static str) {
+        let auth = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let mut seen = seen_auth.lock().await;
+        seen.push(auth);
+
+        if seen.len() <= 2 {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":{"message":"rate limit"}}"#,
+            )
+        } else {
+            (StatusCode::OK, r#"{"ok":true}"#)
+        }
+    }
+
+    /// 永远回 429（anyrouter 不冷却断言用）。
+    async fn always_rate_limited_mock_handler(
+        State(seen_auth): State<Arc<Mutex<Vec<String>>>>,
+        headers: HeaderMap,
+        _body: Bytes,
+    ) -> (StatusCode, &'static str) {
+        let auth = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        seen_auth.lock().await.push(auth);
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"message":"rate limit"}}"#,
+        )
     }
 
     async fn provider_routing_mock_handler(
@@ -3011,6 +3221,18 @@ mod tests {
 
     fn install_test_crypto_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    /// 等待后台成功记账任务落库（record_success_result 异步化后，亲和绑定 /
+    /// key 成功记录在 spawn 出的任务里完成，测试断言前需轮询等待）。
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if condition() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("后台记账未在 1s 内落库");
     }
 
     #[test]
@@ -3284,6 +3506,15 @@ mod tests {
             .get_provider_key("claude", "provider-1", &key_1.id)
             .unwrap()
             .unwrap();
+        // 成功记账（key 成功 + 亲和绑定）已异步化，轮询等待落库
+        wait_until(|| {
+            db.get_provider_key("claude", "provider-1", &key_2.id)
+                .unwrap()
+                .unwrap()
+                .last_success_at
+                .is_some()
+        })
+        .await;
         let key_2_after = db
             .get_provider_key("claude", "provider-1", &key_2.id)
             .unwrap()
@@ -3304,12 +3535,186 @@ mod tests {
         assert_eq!(key_2_after.consecutive_failures, 0);
         assert!(key_2_after.last_success_at.is_some());
 
+        wait_until(|| db.get_working_channel_affinity("claude").unwrap().is_some()).await;
         let working_channel = db
             .get_working_channel_affinity("claude")
             .unwrap()
             .expect("successful key should become preferred working channel");
         assert_eq!(working_channel.provider_id, "provider-1");
         assert_eq!(working_channel.key_id.as_deref(), Some(key_2.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn anyrouter_429_retries_same_channel_beyond_max_attempts_setting() {
+        install_test_crypto_provider();
+
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(anyrouter_rate_limit_mock_handler))
+            .with_state(seen_auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock upstream server");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let provider = Provider::with_id(
+            "anyrouter-1".to_string(),
+            "AnyRouter 主力".to_string(),
+            json!({
+                "base_url": base_url,
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-anyrouter"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider).unwrap();
+        db.set_current_provider("claude", "anyrouter-1").unwrap();
+
+        let mut forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
+        // max_retries=0 语义（仅尝试一家、无故障转移）：anyrouter 的 429
+        // 原地重试预算独立于该设置，两次 429 后第三次仍应成功。
+        forwarder.max_attempts = 1;
+        forwarder.current_provider_id_at_start = "anyrouter-1".to_string();
+        let attempts = forwarder.router.select_providers("claude").await.unwrap();
+
+        let result = forwarder
+            .forward_with_retry(
+                &AppType::Claude,
+                http::Method::POST,
+                "/v1/messages",
+                json!({
+                    "model": "claude-3-5-sonnet-latest",
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                attempts,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("anyrouter 429 retry should succeed: {}", err.error));
+
+        assert_eq!(
+            result.response.bytes().await.unwrap(),
+            Bytes::from_static(b"{\"ok\":true}")
+        );
+        // 两次 429 + 一次成功，全部打在同一通道上
+        assert_eq!(seen_auth.lock().await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn anyrouter_429_does_not_mark_key_cooldown_or_degraded() {
+        install_test_crypto_provider();
+
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(always_rate_limited_mock_handler))
+            .with_state(seen_auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock upstream server");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let provider = Provider::with_id(
+            "anyrouter-1".to_string(),
+            "anyrouter 免费池".to_string(),
+            json!({
+                "base_url": base_url,
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-key-1"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider).unwrap();
+        db.set_current_provider("claude", "anyrouter-1").unwrap();
+
+        let key_1 = db
+            .add_provider_key(
+                "claude",
+                "anyrouter-1",
+                &crate::provider::ProviderKeyInput {
+                    name: "key-1".to_string(),
+                    key_value: "sk-key-1".to_string(),
+                    auth_field: Some("env.ANTHROPIC_AUTH_TOKEN".to_string()),
+                    enabled: true,
+                    priority: 10,
+                    weight: 1,
+                },
+            )
+            .unwrap();
+        let key_2 = db
+            .add_provider_key(
+                "claude",
+                "anyrouter-1",
+                &crate::provider::ProviderKeyInput {
+                    name: "key-2".to_string(),
+                    key_value: "sk-key-2".to_string(),
+                    auth_field: Some("env.ANTHROPIC_AUTH_TOKEN".to_string()),
+                    enabled: true,
+                    priority: 20,
+                    weight: 1,
+                },
+            )
+            .unwrap();
+
+        let mut forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.max_attempts = 2;
+        // 预算清零：跳过原地重试，直接验证"429 落入通用分类但不标记冷却"
+        forwarder.anyrouter_429_max_retries = 0;
+        forwarder.current_provider_id_at_start = "anyrouter-1".to_string();
+        let attempts = forwarder.router.select_providers("claude").await.unwrap();
+
+        let err = forwarder
+            .forward_with_retry(
+                &AppType::Claude,
+                http::Method::POST,
+                "/v1/messages",
+                json!({
+                    "model": "claude-3-5-sonnet-latest",
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                attempts,
+            )
+            .await
+            .err()
+            .expect("all keys rate limited, request should fail");
+        assert!(matches!(
+            err.error,
+            ProxyError::UpstreamError { status: 429, .. }
+        ));
+
+        // 两个 key 都被尝试过，但既不 Degraded 也无冷却 —— anyrouter 429 不计入健康度
+        //（对照 key_scoped_upstream_failure_fails_over_to_next_key：普通渠道同样场景
+        //  会标 Degraded 且 consecutive_failures=1）
+        assert_eq!(seen_auth.lock().await.len(), 2);
+        for key in [&key_1, &key_2] {
+            let after = db
+                .get_provider_key("claude", "anyrouter-1", &key.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.status, crate::provider::ProviderKeyStatus::Active);
+            assert_eq!(after.consecutive_failures, 0);
+            assert!(after.cooldown_until.is_none());
+        }
     }
 
     #[tokio::test]
@@ -3407,6 +3812,14 @@ mod tests {
             first.response.bytes().await.unwrap(),
             Bytes::from_static(b"{\"ok\":true}")
         );
+
+        // 工作通道亲和绑定已异步化，等待落库后再做第二次路由
+        wait_until(|| {
+            db.get_working_channel_affinity("claude")
+                .unwrap()
+                .is_some_and(|binding| binding.key_id.as_deref() == Some(key_2.id.as_str()))
+        })
+        .await;
 
         let second_attempts = forwarder.router.select_providers("claude").await.unwrap();
         assert_eq!(
@@ -3927,6 +4340,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interleaved_attempt_order_still_reaches_next_provider() {
+        // 回归：旧 pending 跳过机制下，交错顺序 [A:k2, B, A:k1] 中 A:k2 失败
+        // 会设置 pending=A 并 continue 跳过 B；走到 A:k1 清除 pending 后迭代器
+        // 已越过 B 永不回头 —— A 全部 key 失败时 B 根本没被尝试。
+        // 删除 pending 机制后，循环按顺序逐个尝试，B 必然被命中。
+        install_test_crypto_provider();
+
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(provider_routing_mock_handler))
+            .with_state(seen_auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock upstream server");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let provider_a = Provider::with_id(
+            "provider-a".to_string(),
+            "Provider A".to_string(),
+            json!({
+                "base_url": base_url,
+                "env": { "ANTHROPIC_AUTH_TOKEN": "legacy-a" }
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "provider-b".to_string(),
+            "Provider B".to_string(),
+            json!({
+                "base_url": base_url,
+                "env": { "ANTHROPIC_AUTH_TOKEN": "sk-provider-2" }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider_a).unwrap();
+        db.save_provider("claude", &provider_b).unwrap();
+
+        let key_a1 = db
+            .add_provider_key(
+                "claude",
+                "provider-a",
+                &crate::provider::ProviderKeyInput {
+                    name: "a-1".to_string(),
+                    key_value: "sk-key-rate-limited-1".to_string(),
+                    auth_field: Some("env.ANTHROPIC_AUTH_TOKEN".to_string()),
+                    enabled: true,
+                    priority: 10,
+                    weight: 1,
+                },
+            )
+            .unwrap();
+        let key_a2 = db
+            .add_provider_key(
+                "claude",
+                "provider-a",
+                &crate::provider::ProviderKeyInput {
+                    name: "a-2".to_string(),
+                    key_value: "sk-key-rate-limited-2".to_string(),
+                    auth_field: Some("env.ANTHROPIC_AUTH_TOKEN".to_string()),
+                    enabled: true,
+                    priority: 20,
+                    weight: 1,
+                },
+            )
+            .unwrap();
+
+        let mut forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.max_attempts = 3;
+        forwarder.current_provider_id_at_start = "provider-a".to_string();
+
+        // 手工构造曾触发 bug 的交错顺序（affinity 单点置顶的产物）
+        let expanded = forwarder.router.select_providers("claude").await;
+        drop(expanded); // 仅为确保路由可用，顺序由下方手工指定
+        let mut provider_a_k2 = provider_a.clone();
+        provider_a_k2.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] =
+            json!("sk-key-rate-limited-2");
+        let mut provider_a_k1 = provider_a.clone();
+        provider_a_k1.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"] =
+            json!("sk-key-rate-limited-1");
+        let attempts = vec![
+            ProviderAttempt {
+                provider: provider_a_k2,
+                key_id: Some(key_a2.id.clone()),
+            },
+            ProviderAttempt {
+                provider: provider_b,
+                key_id: None,
+            },
+            ProviderAttempt {
+                provider: provider_a_k1,
+                key_id: Some(key_a1.id.clone()),
+            },
+        ];
+
+        let result = match forwarder
+            .forward_with_retry(
+                &AppType::Claude,
+                http::Method::POST,
+                "/v1/messages",
+                json!({
+                    "model": "claude-3-5-sonnet-latest",
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                attempts,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => panic!("provider B must be reached: {}", err.error),
+        };
+
+        assert_eq!(result.provider.id, "provider-b");
+        assert_eq!(
+            result.response.bytes().await.unwrap(),
+            Bytes::from_static(b"{\"ok\":true}")
+        );
+        // A:k2 失败后下一个 attempt（B）立即被尝试，而非被跳过
+        assert_eq!(
+            *seen_auth.lock().await,
+            vec![
+                "Bearer sk-key-rate-limited-2".to_string(),
+                "Bearer sk-provider-2".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn key_scoped_failure_does_not_increment_provider_health_failures() {
         install_test_crypto_provider();
 
@@ -4130,6 +4680,13 @@ mod tests {
             Bytes::from_static(b"{\"ok\":true}")
         );
 
+        // Session 亲和重绑定已异步化，轮询等待落库
+        wait_until(|| {
+            db.get_session_affinity("claude", "session-1")
+                .unwrap()
+                .is_some_and(|binding| binding.key_id.as_deref() == Some(key_2.id.as_str()))
+        })
+        .await;
         let affinity = db
             .get_session_affinity("claude", "session-1")
             .expect("get session affinity")

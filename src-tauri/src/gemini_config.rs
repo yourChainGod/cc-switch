@@ -300,16 +300,51 @@ fn update_selected_type(selected_type: &str) -> Result<(), AppError> {
     }
 
     // 读取现有的 settings.json（如果存在）
+    //
+    // 注意：文件存在但解析失败时必须中止并返回错误，绝不能退化成空对象后整文件重写，
+    // 否则用户手写 settings.json 中的全部配置会被静默清空（只剩 selectedType 骨架）。
+    // 文件不存在或内容为空白时仍按空对象处理。
     let mut settings_content = if settings_path.exists() {
         let content =
             fs::read_to_string(&settings_path).map_err(|e| AppError::io(&settings_path, e))?;
-        serde_json::from_str::<Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str::<Value>(&content).map_err(|e| {
+                AppError::localized(
+                    "gemini.settings.parse_error",
+                    format!(
+                        "Gemini settings.json 解析失败（{}）: {e}。已取消写入以保护现有配置，请先修复或删除该文件后重试。",
+                        settings_path.display()
+                    ),
+                    format!(
+                        "Failed to parse Gemini settings.json ({}): {e}. Write aborted to protect the existing configuration; please fix or remove the file and retry.",
+                        settings_path.display()
+                    ),
+                )
+            })?
+        }
     } else {
         serde_json::json!({})
     };
 
-    // 只更新 security.auth.selectedType 字段
-    if let Some(obj) = settings_content.as_object_mut() {
+    // 只更新 security.auth.selectedType 字段；根节点不是对象时无法安全合并，
+    // 同样拒绝写入，避免覆盖用户的现有内容。
+    let Some(obj) = settings_content.as_object_mut() else {
+        return Err(AppError::localized(
+            "gemini.settings.not_object",
+            format!(
+                "Gemini settings.json 根节点不是 JSON 对象（{}），已取消写入以避免覆盖现有内容。",
+                settings_path.display()
+            ),
+            format!(
+                "Gemini settings.json root is not a JSON object ({}); write aborted to avoid overwriting existing content.",
+                settings_path.display()
+            ),
+        ));
+    };
+
+    {
         let security = obj
             .entry("security")
             .or_insert_with(|| serde_json::json!({}));
@@ -373,6 +408,9 @@ pub fn write_google_oauth_settings() -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn test_parse_env_file() {
@@ -647,5 +685,118 @@ KEY_WITH-DASH=value";
         });
 
         assert!(validate_gemini_settings(&settings).is_err());
+    }
+
+    // ===== update_selected_type 的文件级测试（隔离临时 HOME）=====
+
+    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn with_temp_home<T>(test: impl FnOnce(&Path) -> T) -> T {
+        let _guard = test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+        let result = test(temp.path());
+        match old_test_home {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_selected_type_rejects_corrupted_settings_without_overwrite() {
+        with_temp_home(|_| {
+            let settings_path = get_gemini_settings_path();
+            fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+            // 模拟用户手写时多打了一个逗号（serde_json 不接受尾随逗号）
+            let corrupted =
+                "{\n  \"theme\": \"dark\",\n  \"mcpServers\": { \"context7\": {} },\n}";
+            fs::write(&settings_path, corrupted).unwrap();
+
+            let err = write_packycode_settings()
+                .expect_err("解析失败时必须返回错误，而不是清空重写");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&settings_path.display().to_string()),
+                "错误信息应包含文件路径: {msg}"
+            );
+            assert!(
+                msg.contains("解析失败") || msg.contains("parse"),
+                "错误信息应包含解析错误说明: {msg}"
+            );
+
+            // 原文件必须一字未动
+            let after = fs::read_to_string(&settings_path).unwrap();
+            assert_eq!(after, corrupted, "损坏的 settings.json 不得被覆盖");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_selected_type_rejects_non_object_root_without_overwrite() {
+        with_temp_home(|_| {
+            let settings_path = get_gemini_settings_path();
+            fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+            fs::write(&settings_path, "[1, 2, 3]").unwrap();
+
+            write_packycode_settings().expect_err("根节点非对象时必须返回错误");
+            assert_eq!(fs::read_to_string(&settings_path).unwrap(), "[1, 2, 3]");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_selected_type_preserves_existing_fields_on_disk() {
+        with_temp_home(|_| {
+            let settings_path = get_gemini_settings_path();
+            fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+            fs::write(
+                &settings_path,
+                "{\n  \"theme\": \"dark\",\n  \"security\": { \"keychain\": true }\n}",
+            )
+            .unwrap();
+
+            write_google_oauth_settings().unwrap();
+
+            let value: Value =
+                serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+            assert_eq!(value["theme"], "dark");
+            assert_eq!(value["security"]["keychain"], true);
+            assert_eq!(value["security"]["auth"]["selectedType"], "oauth-personal");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_update_selected_type_treats_missing_and_blank_file_as_empty_object() {
+        with_temp_home(|_| {
+            let settings_path = get_gemini_settings_path();
+
+            // 文件不存在 → 创建骨架
+            write_packycode_settings().unwrap();
+            let value: Value =
+                serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+            assert_eq!(value["security"]["auth"]["selectedType"], "gemini-api-key");
+
+            // 空白文件 → 仍按空对象处理，不报错
+            fs::write(&settings_path, "  \n").unwrap();
+            write_google_oauth_settings().unwrap();
+            let value: Value =
+                serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+            assert_eq!(value["security"]["auth"]["selectedType"], "oauth-personal");
+        });
     }
 }

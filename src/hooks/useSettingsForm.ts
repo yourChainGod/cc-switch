@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSettingsQuery } from "@/lib/query";
 import type { Settings } from "@/types";
+import { sanitizeDirectorySettingsFields } from "./useDirectorySettings";
 
 type Language = "zh" | "zh-TW" | "en" | "ja";
 
@@ -43,12 +44,6 @@ const isSupportedLanguage = (lang?: string | null): boolean => {
   return (
     normalized === "en" || normalized === "ja" || normalized.startsWith("zh")
   );
-};
-
-const sanitizeDir = (value?: string | null): string | undefined => {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
 };
 
 export interface UseSettingsFormResult {
@@ -118,11 +113,8 @@ export function useSettingsForm(): UseSettingsFormResult {
       skipClaudeOnboarding: data.skipClaudeOnboarding ?? false,
       preserveCodexOfficialAuthOnSwitch:
         data.preserveCodexOfficialAuthOnSwitch ?? false,
-      claudeConfigDir: sanitizeDir(data.claudeConfigDir),
-      codexConfigDir: sanitizeDir(data.codexConfigDir),
-      geminiConfigDir: sanitizeDir(data.geminiConfigDir),
-      opencodeConfigDir: sanitizeDir(data.opencodeConfigDir),
-      openclawConfigDir: sanitizeDir(data.openclawConfigDir),
+      // 表驱动：所有应用目录字段统一 trim/sanitize（含 hermesConfigDir）
+      ...sanitizeDirectorySettingsFields(data),
       language: normalizedLanguage,
     };
 
@@ -182,11 +174,8 @@ export function useSettingsForm(): UseSettingsFormResult {
         skipClaudeOnboarding: serverData.skipClaudeOnboarding ?? false,
         preserveCodexOfficialAuthOnSwitch:
           serverData.preserveCodexOfficialAuthOnSwitch ?? false,
-        claudeConfigDir: sanitizeDir(serverData.claudeConfigDir),
-        codexConfigDir: sanitizeDir(serverData.codexConfigDir),
-        geminiConfigDir: sanitizeDir(serverData.geminiConfigDir),
-        opencodeConfigDir: sanitizeDir(serverData.opencodeConfigDir),
-        openclawConfigDir: sanitizeDir(serverData.openclawConfigDir),
+        // 表驱动：所有应用目录字段统一 trim/sanitize（含 hermesConfigDir）
+        ...sanitizeDirectorySettingsFields(serverData),
         language: normalizedLanguage,
       };
 

@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { ChevronRight, Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -26,10 +27,11 @@ interface SessionItemProps {
   isCheckDisabled?: boolean;
   searchQuery?: string;
   onSelect: (key: string) => void;
-  onToggleChecked: (checked: boolean) => void;
+  // 接收 session 参数以便父组件传入稳定回调（配合 memo，避免每行新建闭包）
+  onToggleChecked: (session: SessionMeta, checked: boolean) => void;
 }
 
-export function SessionItem({
+function SessionItemImpl({
   session,
   isSelected,
   selectionMode,
@@ -61,7 +63,9 @@ export function SessionItem({
             aria-label={t("sessionManager.selectForBatch", {
               defaultValue: "选择会话",
             })}
-            onCheckedChange={(checked) => onToggleChecked(Boolean(checked))}
+            onCheckedChange={(checked) =>
+              onToggleChecked(session, Boolean(checked))
+            }
           />
         </div>
       )}
@@ -108,3 +112,6 @@ export function SessionItem({
     </div>
   );
 }
+
+// memo：搜索词防抖后，未受影响的会话行在父组件重渲染时不再逐行重渲染
+export const SessionItem = memo(SessionItemImpl);

@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import { memo, useMemo, useState, useEffect } from "react";
 import { GripVertical, ChevronDown, ChevronUp, Route } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
@@ -8,6 +8,7 @@ import type {
 import type { Provider, ProviderKeySummary } from "@/types";
 import type { AppId } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { isAdditiveApp } from "@/config/additiveApps";
 import { ProviderActions } from "@/components/providers/ProviderActions";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import UsageFooter from "@/components/UsageFooter";
@@ -132,7 +133,7 @@ const extractApiUrl = (provider: Provider, fallbackText: string) => {
   return fallbackText;
 };
 
-export function ProviderCard({
+function ProviderCardImpl({
   provider,
   isCurrent,
   appId,
@@ -233,10 +234,7 @@ export function ProviderCard({
 
   // 获取用量数据以判断是否有多套餐
   // 累加模式应用（OpenCode/OpenClaw/Hermes）：使用 isInConfig 代替 isCurrent
-  const shouldAutoQuery =
-    appId === "opencode" || appId === "openclaw" || appId === "hermes"
-      ? isInConfig
-      : isCurrent;
+  const shouldAutoQuery = isAdditiveApp(appId) ? isInConfig : isCurrent;
   const autoQueryInterval = shouldAutoQuery
     ? provider.meta?.usage_script?.autoQueryInterval || 0
     : 0;
@@ -670,3 +668,7 @@ export function ProviderCard({
     </div>
   );
 }
+
+// memo：代理轮询/列表搜索等导致父级重渲染时，props 未变的卡片不再重渲染。
+// 配合 ProviderList 中对回调/对象 props 的稳定化（useCallback/useMemo）生效。
+export const ProviderCard = memo(ProviderCardImpl);

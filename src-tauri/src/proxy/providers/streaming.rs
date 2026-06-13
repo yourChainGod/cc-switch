@@ -99,6 +99,95 @@ struct ToolBlockState {
 /// 无限空白 bug 的连续空白字符阈值
 const INFINITE_WHITESPACE_THRESHOLD: usize = 500;
 
+/// 上游错误负载的统一描述（供各 SSE → Anthropic 转换器共享）。
+pub(crate) struct UpstreamErrorInfo {
+    pub error_type: String,
+    pub message: String,
+}
+
+impl UpstreamErrorInfo {
+    pub(crate) fn new(error_type: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            error_type: error_type.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// 从一个错误对象（或错误字符串）中提取 type/message。
+///
+/// message 优先取 `message`/`detail` 字符串字段，否则整体序列化兜底；
+/// type 依次取 `type`/`status`/`code`（Gemini 的 `status` 比数字 `code` 更可读），
+/// 兜底 `upstream_error`。
+pub(crate) fn extract_upstream_error_fields(error: &Value) -> UpstreamErrorInfo {
+    let message = error
+        .as_str()
+        .map(ToString::to_string)
+        .or_else(|| {
+            error
+                .get("message")
+                .or_else(|| error.get("detail"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| error.to_string());
+    let error_type = error
+        .get("type")
+        .or_else(|| error.get("status"))
+        .or_else(|| error.get("code"))
+        .map(|v| match v.as_str() {
+            Some(s) => s.to_string(),
+            None => v.to_string(),
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "upstream_error".to_string());
+    UpstreamErrorInfo {
+        error_type,
+        message,
+    }
+}
+
+/// 识别常见的上游 mid-stream 错误负载：
+/// - 顶层 `{"error": {...}}` / `{"error": "..."}`（OpenAI / Gemini / 多数兼容网关）
+/// - `{"type": "error", ...}`（Anthropic 风格，错误内容可能内嵌也可能平铺）
+///
+/// 返回 `None` 表示该负载不是错误。注意：部分兼容服务在正常 chunk 里携带
+/// `"error": null`，此处显式过滤避免误判。
+pub(crate) fn detect_upstream_error(value: &Value) -> Option<UpstreamErrorInfo> {
+    if let Some(error) = value.get("error").filter(|e| !e.is_null()) {
+        return Some(extract_upstream_error_fields(error));
+    }
+    if value.get("type").and_then(|t| t.as_str()) == Some("error") {
+        return Some(extract_upstream_error_fields(value));
+    }
+    None
+}
+
+/// 按 Anthropic SSE 语义构造 `event: error` 事件字节。
+pub(crate) fn anthropic_error_sse_bytes(error: &UpstreamErrorInfo) -> Bytes {
+    let event = json!({
+        "type": "error",
+        "error": {
+            "type": error.error_type,
+            "message": error.message
+        }
+    });
+    Bytes::from(format!(
+        "event: error\ndata: {}\n\n",
+        serde_json::to_string(&event).unwrap_or_default()
+    ))
+}
+
+/// 截断原文用于日志，避免超长 data 刷屏。
+fn truncate_for_log(data: &str, max_chars: usize) -> String {
+    if data.chars().count() <= max_chars {
+        data.to_string()
+    } else {
+        let truncated: String = data.chars().take(max_chars).collect();
+        format!("{truncated}...(truncated)")
+    }
+}
+
 fn build_anthropic_usage_json(usage: &Usage) -> Value {
     let mut usage_json = json!({
         "input_tokens": usage.prompt_tokens,
@@ -168,7 +257,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                 Ok(bytes) => {
                     crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
 
-                    while let Some(line) = take_sse_block(&mut buffer) {
+                    'blocks: while let Some(line) = take_sse_block(&mut buffer) {
                         if line.trim().is_empty() {
                             continue;
                         }
@@ -196,7 +285,34 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                     continue;
                                 }
 
-                                if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                                let parsed: Value = match serde_json::from_str(data) {
+                                    Ok(value) => value,
+                                    Err(parse_error) => {
+                                        // 解析失败的 data 不再静默丢弃：其中可能是上游错误块或截断负载。
+                                        log::warn!(
+                                            "[Claude/OpenRouter] 丢弃无法解析的上游 SSE data ({parse_error}): {}",
+                                            truncate_for_log(data, 200)
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                // 上游 mid-stream 错误块（如 {"error":{...}}）：按 Anthropic SSE 语义
+                                // 转发 event: error 后终止。终止路径与下方 Err(e) 分支一致 ——
+                                // 只保留 error 事件、不补发 message_delta/message_stop，
+                                // 避免把上游失败伪装成成功完成。
+                                if let Some(upstream_error) = detect_upstream_error(&parsed) {
+                                    log::warn!(
+                                        "[Claude/OpenRouter] 上游流内错误 ({}): {}",
+                                        upstream_error.error_type,
+                                        upstream_error.message
+                                    );
+                                    yield Ok(anthropic_error_sse_bytes(&upstream_error));
+                                    stream_ended_with_error = true;
+                                    break 'blocks;
+                                }
+
+                                if let Ok(chunk) = serde_json::from_value::<OpenAIStreamChunk>(parsed) {
                                     log::debug!("[Claude/OpenRouter] <<< SSE chunk received");
 
                                     if message_id.is_none() && !chunk.id.is_empty() {
@@ -607,20 +723,18 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                             }
                         }
                     }
+
+                    if stream_ended_with_error {
+                        break;
+                    }
                 }
                 Err(e) => {
                     log::error!("Stream error: {e}");
                     stream_ended_with_error = true;
-                    let error_event = json!({
-                        "type": "error",
-                        "error": {
-                            "type": "stream_error",
-                            "message": format!("Stream error: {e}")
-                        }
-                    });
-                    let sse_data = format!("event: error\ndata: {}\n\n",
-                        serde_json::to_string(&error_event).unwrap_or_default());
-                    yield Ok(Bytes::from(sse_data));
+                    yield Ok(anthropic_error_sse_bytes(&UpstreamErrorInfo::new(
+                        "stream_error",
+                        format!("Stream error: {e}"),
+                    )));
                     break;
                 }
             }
@@ -1139,5 +1253,82 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| e.get("type").and_then(|v| v.as_str()) == Some("message_stop")));
+    }
+
+    #[test]
+    fn test_detect_upstream_error_shapes() {
+        // 顶层 error 对象（OpenAI 风格）
+        let err = detect_upstream_error(&serde_json::json!({
+            "error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}
+        }))
+        .expect("should detect top-level error object");
+        assert_eq!(err.error_type, "rate_limit_error");
+        assert_eq!(err.message, "Rate limit exceeded");
+
+        // Gemini 风格：数字 code + status，status 优先
+        let err = detect_upstream_error(&serde_json::json!({
+            "error": {"code": 429, "message": "quota exceeded", "status": "RESOURCE_EXHAUSTED"}
+        }))
+        .expect("should detect gemini error object");
+        assert_eq!(err.error_type, "RESOURCE_EXHAUSTED");
+
+        // error 为字符串
+        let err = detect_upstream_error(&serde_json::json!({"error": "boom"}))
+            .expect("should detect string error");
+        assert_eq!(err.message, "boom");
+
+        // Anthropic 风格 {"type":"error", ...}
+        let err = detect_upstream_error(&serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"}
+        }))
+        .expect("should detect anthropic-style error");
+        assert_eq!(err.error_type, "overloaded_error");
+
+        // 兼容服务在正常 chunk 里携带 "error": null —— 不得误判
+        assert!(detect_upstream_error(&serde_json::json!({
+            "id": "chatcmpl_x", "error": null, "choices": []
+        }))
+        .is_none());
+
+        // 普通 chunk
+        assert!(detect_upstream_error(&serde_json::json!({
+            "id": "chatcmpl_x", "choices": [{"delta": {"content": "hi"}}]
+        }))
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_upstream_error_payload_emits_anthropic_error_event() {
+        // 上游 mid-stream 报错（如限流/配额）必须转发为 Anthropic error 事件，
+        // 且不得补发 message_delta/message_stop 把失败伪装成成功。
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_err\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n",
+            "data: {\"error\":{\"message\":\"Rate limit exceeded\",\"type\":\"rate_limit_error\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_anthropic_events(input).await;
+
+        let error_event = events
+            .iter()
+            .find(|event| event_type(event) == Some("error"))
+            .expect("upstream error payload must surface as an Anthropic error event");
+        assert_eq!(
+            error_event.pointer("/error/type").and_then(|v| v.as_str()),
+            Some("rate_limit_error")
+        );
+        assert_eq!(
+            error_event
+                .pointer("/error/message")
+                .and_then(|v| v.as_str()),
+            Some("Rate limit exceeded")
+        );
+        assert!(!events
+            .iter()
+            .any(|event| event_type(event) == Some("message_delta")));
+        assert!(!events
+            .iter()
+            .any(|event| event_type(event) == Some("message_stop")));
     }
 }

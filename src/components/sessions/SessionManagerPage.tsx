@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionSearch } from "@/hooks/useSessionSearch";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useTranslation } from "react-i18next";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { toast } from "sonner";
@@ -91,6 +92,9 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const [search, setSearch] = useState("");
+  // 搜索词防抖：输入框即时回显，过滤计算与列表渲染延迟 200ms，
+  // 避免每次击键全量跑 FlexSearch 并重渲染所有会话行
+  const debouncedSearch = useDebouncedValue(search, 200);
   const [providerFilter, setProviderFilter] = useState<ProviderFilter>(
     appId as ProviderFilter,
   );
@@ -103,8 +107,8 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   });
 
   const filteredSessions = useMemo(() => {
-    return searchSessions(search);
-  }, [searchSessions, search]);
+    return searchSessions(debouncedSearch);
+  }, [searchSessions, debouncedSearch]);
 
   useEffect(() => {
     if (filteredSessions.length === 0) {
@@ -401,19 +405,22 @@ export function SessionManagerPage({ appId }: { appId: string }) {
       selectedSessionKeys.has(getSessionKey(session)),
     );
 
-  const toggleSessionChecked = (session: SessionMeta, checked: boolean) => {
-    if (!session.sourcePath) return;
-    const key = getSessionKey(session);
-    setSelectedSessionKeys((current) => {
-      const next = new Set(current);
-      if (checked) {
-        next.add(key);
-      } else {
-        next.delete(key);
-      }
-      return next;
-    });
-  };
+  const toggleSessionChecked = useCallback(
+    (session: SessionMeta, checked: boolean) => {
+      if (!session.sourcePath) return;
+      const key = getSessionKey(session);
+      setSelectedSessionKeys((current) => {
+        const next = new Set(current);
+        if (checked) {
+          next.add(key);
+        } else {
+          next.delete(key);
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   const handleToggleSelectAll = () => {
     setSelectedSessionKeys((current) => {
@@ -796,15 +803,13 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                               session={session}
                               isSelected={isSelected}
                               selectionMode={selectionMode}
-                              searchQuery={search}
+                              searchQuery={debouncedSearch}
                               isChecked={selectedSessionKeys.has(
                                 getSessionKey(session),
                               )}
                               isCheckDisabled={!session.sourcePath}
                               onSelect={setSelectedKey}
-                              onToggleChecked={(checked) =>
-                                toggleSessionChecked(session, checked)
-                              }
+                              onToggleChecked={toggleSessionChecked}
                             />
                           );
                         })}
@@ -1056,7 +1061,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                                       isActive={
                                         activeMessageIndex === virtualRow.index
                                       }
-                                      searchQuery={search}
+                                      searchQuery={debouncedSearch}
                                       onCopy={handleMessageCopy}
                                     />
                                   </div>

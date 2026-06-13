@@ -1093,6 +1093,11 @@ fn map_tool_choice(tool_choice: Option<&Value>) -> Result<Option<Value>, ProxyEr
 /// Convert a Gemini `usageMetadata` object into an Anthropic-style `usage`
 /// object. Used by both the streaming SSE converter and the non-streaming
 /// transform path so the two emit identical shapes.
+///
+/// 语义对齐：Gemini 的 `promptTokenCount` **包含** `cachedContentTokenCount`，
+/// 而 Anthropic 的 `input_tokens` 与 `cache_read_input_tokens` 是互斥桶。
+/// 因此 `input_tokens` 必须扣除缓存部分，否则下游按 Anthropic 公式
+/// （input + cache_read 分开计价）计费时，缓存 token 会被算两遍。
 pub(crate) fn build_anthropic_usage(usage: Option<&Value>) -> Value {
     let Some(usage) = usage else {
         return json!({
@@ -1101,25 +1106,28 @@ pub(crate) fn build_anthropic_usage(usage: Option<&Value>) -> Value {
         });
     };
 
-    let input_tokens = usage
+    let prompt_tokens = usage
         .get("promptTokenCount")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
+    let cached_tokens = usage
+        .get("cachedContentTokenCount")
+        .and_then(|value| value.as_u64());
     let total_tokens = usage
         .get("totalTokenCount")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
-    let output_tokens = total_tokens.saturating_sub(input_tokens);
+    // input_tokens = 非缓存的 prompt 部分；output 仍按 total - 完整 prompt
+    // 计算（totalTokenCount 同样把缓存部分计入 prompt 侧）。
+    let input_tokens = prompt_tokens.saturating_sub(cached_tokens.unwrap_or(0));
+    let output_tokens = total_tokens.saturating_sub(prompt_tokens);
 
     let mut result = json!({
         "input_tokens": input_tokens,
         "output_tokens": output_tokens
     });
 
-    if let Some(cached) = usage
-        .get("cachedContentTokenCount")
-        .and_then(|value| value.as_u64())
-    {
+    if let Some(cached) = cached_tokens {
         result["cache_read_input_tokens"] = json!(cached);
     }
 
@@ -1370,9 +1378,48 @@ mod tests {
         assert_eq!(result["content"][0]["type"], "text");
         assert_eq!(result["content"][0]["text"], "Hello from Gemini");
         assert_eq!(result["stop_reason"], "end_turn");
-        assert_eq!(result["usage"]["input_tokens"], 12);
+        // 语义更新：Gemini promptTokenCount(12) 包含 cachedContentTokenCount(3)，
+        // Anthropic input_tokens 与 cache_read_input_tokens 互斥，须扣除缓存
+        // 避免双计 —— 旧断言 input_tokens == 12 是双计 bug 的行为。
+        assert_eq!(result["usage"]["input_tokens"], 9);
         assert_eq!(result["usage"]["output_tokens"], 8);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 3);
+    }
+
+    #[test]
+    fn build_anthropic_usage_subtracts_cached_tokens_from_input() {
+        // Gemini promptTokenCount 包含 cachedContentTokenCount；Anthropic 语义
+        // 中两者互斥，input_tokens 必须只含非缓存部分。
+        let usage = json!({
+            "promptTokenCount": 100,
+            "cachedContentTokenCount": 40,
+            "totalTokenCount": 130
+        });
+        let result = build_anthropic_usage(Some(&usage));
+        assert_eq!(result["input_tokens"], 60);
+        assert_eq!(result["cache_read_input_tokens"], 40);
+        // output 仍按 total - 完整 prompt 计算
+        assert_eq!(result["output_tokens"], 30);
+
+        // 无缓存字段时行为不变
+        let usage = json!({
+            "promptTokenCount": 10,
+            "totalTokenCount": 15
+        });
+        let result = build_anthropic_usage(Some(&usage));
+        assert_eq!(result["input_tokens"], 10);
+        assert_eq!(result["output_tokens"], 5);
+        assert!(result.get("cache_read_input_tokens").is_none());
+
+        // 异常数据（cached > prompt）不得下溢
+        let usage = json!({
+            "promptTokenCount": 5,
+            "cachedContentTokenCount": 9,
+            "totalTokenCount": 7
+        });
+        let result = build_anthropic_usage(Some(&usage));
+        assert_eq!(result["input_tokens"], 0);
+        assert_eq!(result["cache_read_input_tokens"], 9);
     }
 
     #[test]

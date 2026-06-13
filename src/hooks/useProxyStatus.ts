@@ -14,6 +14,55 @@ import type {
 import { extractErrorMessage } from "@/utils/errorUtils";
 
 /**
+ * proxyStatus 查询的共享配置：
+ * 多个观察者（完整 hook / 切片）共用同一 queryKey 与轮询策略。
+ */
+function useProxyStatusQuery<TData = ProxyStatus>(
+  select?: (status: ProxyStatus) => TData,
+) {
+  return useQuery({
+    queryKey: ["proxyStatus"],
+    queryFn: () => invoke<ProxyStatus>("get_proxy_status"),
+    // 仅在服务运行时轮询
+    refetchInterval: (query) => (query.state.data?.running ? 2000 : false),
+    // 保持之前的数据，避免闪烁
+    placeholderData: (previousData: ProxyStatus | undefined) => previousData,
+    select,
+  });
+}
+
+/**
+ * 订阅 ProxyStatus 的一个切片。
+ *
+ * ProxyStatus 含 uptime_seconds/total_requests 等每次轮询必变的字段，
+ * 直接消费完整 status 会导致组件每 2s 重渲染。通过 select 只订阅
+ * 真正需要的字段（建议返回原始字段/小结构，TanStack Query 会对
+ * select 结果做相等性比较，引用/值不变则不触发重渲染）。
+ *
+ * 注意：selector 需保持引用稳定（模块级函数或 useCallback），
+ * 否则每次渲染都会重新执行 select。
+ */
+export function useProxyStatusSlice<T>(
+  selector: (status: ProxyStatus) => T,
+): T | undefined {
+  const { data } = useProxyStatusQuery(selector);
+  return data;
+}
+
+/**
+ * 仅订阅各应用接管状态（不订阅 proxyStatus 轮询数据）。
+ * 适合只关心 takeover 开关的组件，避免被 2s 轮询打穿。
+ */
+export function useProxyTakeoverStatus() {
+  return useQuery({
+    queryKey: ["proxyTakeoverStatus"],
+    queryFn: () => invoke<ProxyTakeoverStatus>("get_proxy_takeover_status"),
+    placeholderData: (previousData: ProxyTakeoverStatus | undefined) =>
+      previousData,
+  });
+}
+
+/**
  * 代理服务状态管理
  */
 export function useProxyStatus() {
@@ -21,21 +70,10 @@ export function useProxyStatus() {
   const { t } = useTranslation();
 
   // 查询状态（自动轮询）
-  const { data: status, isLoading } = useQuery({
-    queryKey: ["proxyStatus"],
-    queryFn: () => invoke<ProxyStatus>("get_proxy_status"),
-    // 仅在服务运行时轮询
-    refetchInterval: (query) => (query.state.data?.running ? 2000 : false),
-    // 保持之前的数据，避免闪烁
-    placeholderData: (previousData) => previousData,
-  });
+  const { data: status, isLoading } = useProxyStatusQuery();
 
   // 查询各应用接管状态
-  const { data: takeoverStatus } = useQuery({
-    queryKey: ["proxyTakeoverStatus"],
-    queryFn: () => invoke<ProxyTakeoverStatus>("get_proxy_takeover_status"),
-    placeholderData: (previousData) => previousData,
-  });
+  const { data: takeoverStatus } = useProxyTakeoverStatus();
 
   // 启动服务器（总开关：仅启动服务，不接管）
   const startProxyServerMutation = useMutation({

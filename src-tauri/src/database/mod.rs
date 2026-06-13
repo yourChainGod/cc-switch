@@ -107,6 +107,19 @@ impl Database {
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
+        // WAL + busy_timeout：请求热路径（路由/记账/亲和）与后台任务（usage 同步、
+        // 备份、清理）共享这把连接锁，WAL 让小事务写入只追加 WAL 文件、fsync 摊薄到
+        // checkpoint（NORMAL 级别下崩溃最多丢最近事务，不会损坏库）；busy_timeout
+        // 兜底备份/迁移等场景临时打开的第二连接。三者失败均不致命，保持默认即可。
+        if let Err(e) = conn.pragma_update(None, "journal_mode", "WAL") {
+            log::warn!("启用 WAL 失败（继续使用默认 journal 模式）: {e}");
+        }
+        if let Err(e) = conn.pragma_update(None, "synchronous", "NORMAL") {
+            log::warn!("设置 synchronous=NORMAL 失败: {e}");
+        }
+        if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
+            log::warn!("设置 busy_timeout 失败: {e}");
+        }
         if !db_exists {
             // For a brand-new database, configure incremental auto-vacuum
             // before creating any tables so no rebuild is needed later.

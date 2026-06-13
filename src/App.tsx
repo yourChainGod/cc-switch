@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -42,7 +42,12 @@ import { useProviderActions } from "@/hooks/useProviderActions";
 import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
 import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
 import { hermesApi } from "@/lib/api/hermes";
-import { useProxyStatus } from "@/hooks/useProxyStatus";
+import {
+  useProxyStatusSlice,
+  useProxyTakeoverStatus,
+} from "@/hooks/useProxyStatus";
+import type { ProxyStatus } from "@/types/proxy";
+import { isAdditiveApp } from "@/config/additiveApps";
 import { useAutoCompact } from "@/hooks/useAutoCompact";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
@@ -160,6 +165,9 @@ const getInitialView = (): View => {
   return "providers";
 };
 
+// 模块级 selector，保证引用稳定（select 结果为原始 boolean，值不变不触发重渲染）
+const selectProxyRunning = (status: ProxyStatus) => status.running;
+
 function App() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -247,18 +255,18 @@ function App() {
   const addActionButtonClass =
     "bg-orange-500 hover:bg-orange-600 dark:bg-orange-500 dark:hover:bg-orange-600 text-white shadow-lg shadow-orange-500/30 dark:shadow-orange-500/40 rounded-full w-8 h-8";
 
-  const {
-    isRunning: isProxyRunning,
-    takeoverStatus,
-    status: proxyStatus,
-  } = useProxyStatus();
+  // 代理状态切片订阅：ProxyStatus 含 uptime_seconds 等每 2s 必变字段，
+  // 只订阅 running 与当前应用的 active provider id（均为原始值，引用稳定），
+  // 避免代理运行期间整个 App 树每 2s 全量重渲染。
+  const isProxyRunning = useProxyStatusSlice(selectProxyRunning) ?? false;
+  const { data: takeoverStatus } = useProxyTakeoverStatus();
   const isCurrentAppTakeoverActive = takeoverStatus?.[activeApp] || false;
-  const activeProviderId = useMemo(() => {
-    const target = proxyStatus?.active_targets?.find(
-      (t) => t.app_type === activeApp,
-    );
-    return target?.provider_id;
-  }, [proxyStatus?.active_targets, activeApp]);
+  const selectActiveProviderId = useCallback(
+    (status: ProxyStatus) =>
+      status.active_targets?.find((t) => t.app_type === activeApp)?.provider_id,
+    [activeApp],
+  );
+  const activeProviderId = useProxyStatusSlice(selectActiveProviderId);
 
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
     isProxyRunning,
@@ -695,11 +703,7 @@ function App() {
       iconColor: provider.iconColor,
     };
 
-    if (
-      activeApp === "opencode" ||
-      activeApp === "openclaw" ||
-      activeApp === "hermes"
-    ) {
+    if (isAdditiveApp(activeApp)) {
       let liveProviderIds: string[] = [];
       try {
         liveProviderIds =
@@ -962,9 +966,7 @@ function App() {
                         setConfirmAction({ provider, action: "delete" })
                       }
                       onRemoveFromConfig={
-                        activeApp === "opencode" ||
-                        activeApp === "openclaw" ||
-                        activeApp === "hermes"
+                        isAdditiveApp(activeApp)
                           ? (provider) =>
                               setConfirmAction({ provider, action: "remove" })
                           : undefined

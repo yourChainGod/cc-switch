@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
@@ -613,31 +612,21 @@ fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
         return Err(AppError::Config("无法获取用户主目录".to_string()));
     };
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
     let json = serde_json::to_string_pretty(&normalized)
         .map_err(|e| AppError::JsonSerialize { source: e })?;
+
+    // 原子写入：settings.json 是各 app 当前供应商指针、目录覆盖、WebDAV/S3 凭据
+    // 与迁移标记的唯一载体，半写损坏会被 load_from_file 静默回退默认值。
+    // atomic_write 会负责创建父目录。
+    crate::config::atomic_write(&path, json.as_bytes())?;
+
+    // 文件包含明文密码，Unix 上收紧为 0600。
+    // atomic_write 走“临时文件 + rename”，权限必须设置在最终文件上。
     #[cfg(unix)]
     {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
             .map_err(|e| AppError::io(&path, e))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| AppError::io(&path, e))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json).map_err(|e| AppError::io(&path, e))?;
     }
 
     Ok(())
@@ -691,12 +680,17 @@ pub fn get_settings_for_frontend() -> AppSettings {
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     new_settings.normalize_paths();
-    save_settings_file(&new_settings)?;
 
+    // 先拿写锁、在锁内落盘再更新内存，与 mutate_settings 的
+    // “持锁期间内存与磁盘一致”语义对齐。若先落盘再拿锁，
+    // 与并发的 mutate_settings（如切换供应商）交错时会用旧快照
+    // 覆盖刚写入磁盘的字段（“切了又弹回”）。
+    // 落盘失败时内存保持不变，仍与磁盘上的旧内容一致。
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
     });
+    save_settings_file(&new_settings)?;
     *guard = new_settings;
     Ok(())
 }
@@ -1021,6 +1015,35 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+    use serial_test::serial;
+
+    /// 将 home 重定向到临时目录，Drop 时恢复原 `CC_SWITCH_TEST_HOME`。
+    struct TestHome {
+        dir: tempfile::TempDir,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("create temp home");
+            let old = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            Self { dir, old }
+        }
+
+        fn settings_path(&self) -> PathBuf {
+            self.dir.path().join(".cc-switch").join("settings.json")
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
 
     #[test]
     fn visible_apps_old_settings_default_claude_desktop_visible() {
@@ -1051,5 +1074,128 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    #[serial]
+    fn save_settings_file_round_trips_without_temp_leftovers() {
+        let home = TestHome::new();
+
+        let settings = AppSettings {
+            preferred_terminal: Some("ghostty".to_string()),
+            webdav_sync: Some(WebDavSyncSettings {
+                base_url: "https://dav.example.com".to_string(),
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+                ..WebDavSyncSettings::default()
+            }),
+            ..AppSettings::default()
+        };
+
+        save_settings_file(&settings).expect("save settings");
+
+        let path = home.settings_path();
+        let content = fs::read_to_string(&path).expect("read settings.json");
+        let loaded: AppSettings = serde_json::from_str(&content).expect("parse settings.json");
+        assert_eq!(loaded.preferred_terminal.as_deref(), Some("ghostty"));
+        assert_eq!(
+            loaded.webdav_sync.as_ref().map(|s| s.password.as_str()),
+            Some("secret")
+        );
+
+        // 原子写入不应留下临时文件
+        let leftovers: Vec<String> = fs::read_dir(path.parent().expect("parent dir"))
+            .expect("list dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "settings.json")
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected leftovers: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn save_settings_file_enforces_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TestHome::new();
+        let path = home.settings_path();
+
+        // 首次创建即为 0600
+        save_settings_file(&AppSettings::default()).expect("initial save");
+        let mode = fs::metadata(&path)
+            .expect("stat settings.json")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "fresh settings.json should be 0600");
+
+        // 即使已有文件被放宽过权限，覆盖写入后也要收紧回 0600
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("loosen perms");
+        save_settings_file(&AppSettings::default()).expect("overwrite save");
+        let mode = fs::metadata(&path)
+            .expect("stat settings.json")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "rewritten settings.json should be 0600");
+    }
+
+    #[test]
+    #[serial]
+    fn update_settings_syncs_memory_and_disk() {
+        let _home = TestHome::new();
+        update_settings(AppSettings::default()).expect("reset settings");
+
+        let next = AppSettings {
+            current_provider_claude: Some("provider-1".to_string()),
+            ..AppSettings::default()
+        };
+        update_settings(next).expect("update settings");
+
+        assert_eq!(
+            get_settings().current_provider_claude.as_deref(),
+            Some("provider-1")
+        );
+        assert_eq!(
+            AppSettings::load_from_file()
+                .current_provider_claude
+                .as_deref(),
+            Some("provider-1")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn concurrent_update_and_mutate_leave_disk_consistent_with_memory() {
+        let _home = TestHome::new();
+        update_settings(AppSettings::default()).expect("reset settings");
+
+        // update_settings（整体替换）与 mutate_settings（增量修改，
+        // 例如切换供应商）并发交错。修复前 update_settings 在锁外落盘，
+        // 可能用旧快照覆盖 mutate 刚写入磁盘的字段（“切了又弹回”）。
+        let updater = std::thread::spawn(|| {
+            for i in 0..25 {
+                let next = AppSettings {
+                    preferred_terminal: Some(format!("terminal-{i}")),
+                    ..AppSettings::default()
+                };
+                update_settings(next).expect("update settings");
+            }
+        });
+        let mutator = std::thread::spawn(|| {
+            for i in 0..25 {
+                set_current_provider(&AppType::Claude, Some(&format!("provider-{i}")))
+                    .expect("set current provider");
+            }
+        });
+        updater.join().expect("updater thread");
+        mutator.join().expect("mutator thread");
+
+        // 每次落盘都发生在写锁内：最终磁盘内容必须与内存快照一致
+        let in_memory = serde_json::to_value(get_settings()).expect("serialize memory");
+        let on_disk = serde_json::to_value(AppSettings::load_from_file()).expect("serialize disk");
+        assert_eq!(in_memory, on_disk);
     }
 }

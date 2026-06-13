@@ -19,6 +19,7 @@ import { codexProviderPresets } from "@/config/codexProviderPresets";
 import { geminiProviderPresets } from "@/config/geminiProviderPresets";
 import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
 import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
+import { isAdditiveApp } from "@/config/additiveApps";
 import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
 import type { UniversalProviderPreset } from "@/config/universalProviderPresets";
 
@@ -128,11 +129,8 @@ export function AddProviderDialog({
           preset?.category === "official";
       }
 
-      // OpenCode/OpenClaw: pass providerKey for ID generation
-      if (
-        (appId === "opencode" || appId === "openclaw" || appId === "hermes") &&
-        values.providerKey
-      ) {
+      // providerKey 型应用（OpenCode/OpenClaw/Hermes）：传递 providerKey 用于生成主键 ID
+      if (isAdditiveApp(appId) && values.providerKey) {
         providerData.providerKey = values.providerKey;
       }
 

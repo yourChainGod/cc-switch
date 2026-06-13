@@ -4,6 +4,7 @@
 //! SSE events for Claude-compatible clients.
 
 use super::gemini_shadow::{GeminiShadowStore, GeminiToolCallMeta};
+use super::streaming::{anthropic_error_sse_bytes, detect_upstream_error, UpstreamErrorInfo};
 use super::transform_gemini::{
     build_anthropic_usage, is_synthesized_tool_call_id, rectify_tool_call_parts,
     synthesize_tool_call_id, AnthropicToolSchemaHints,
@@ -289,6 +290,20 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                             Err(_) => continue,
                         };
 
+                        // Gemini mid-stream 错误块（如 {"error":{"code":429,...,
+                        // "status":"RESOURCE_EXHAUSTED"}}）：按 Anthropic SSE 语义转发
+                        // event: error 后直接终止，跳过流末尾的 message_delta/message_stop
+                        // 收尾，避免把上游失败（限流、配额）伪装成成功完成。
+                        if let Some(upstream_error) = detect_upstream_error(&chunk_json) {
+                            log::warn!(
+                                "[Claude/Gemini] 上游流内错误 ({}): {}",
+                                upstream_error.error_type,
+                                upstream_error.message
+                            );
+                            yield Ok(anthropic_error_sse_bytes(&upstream_error));
+                            return;
+                        }
+
                         if message_id.is_none() {
                             message_id = chunk_json
                                 .get("responseId")
@@ -403,7 +418,14 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                     }
                 }
                 Err(error) => {
-                    yield Err(std::io::Error::other(error.to_string()));
+                    // 传输层错误：先按 Anthropic SSE 语义发出 error 事件（带真实原因）
+                    // 再终止，而不是 yield Err 裸断流 —— 后者会让客户端只看到
+                    // "连接中断/流被截断"，丢失上游错误信息。
+                    log::error!("[Claude/Gemini] stream error: {error}");
+                    yield Ok(anthropic_error_sse_bytes(&UpstreamErrorInfo::new(
+                        "stream_error",
+                        format!("Stream error: {error}"),
+                    )));
                     return;
                 }
             }
@@ -1050,5 +1072,53 @@ mod tests {
             shadow["parts"][0]["thoughtSignature"], "sig-keep",
             "prior thoughtSignature must survive a later chunk that omits it: {shadow}"
         );
+    }
+
+    #[test]
+    fn upstream_error_chunk_emits_anthropic_error_event() {
+        // Gemini mid-stream 错误块（限流/配额）必须转发为 Anthropic error 事件，
+        // 且不得再发 message_delta/message_stop 把失败伪装成成功完成。
+        let output = collect_stream_output(vec![
+            "data: {\"responseId\":\"resp_err\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}]}}],\"usageMetadata\":{\"promptTokenCount\":10,\"totalTokenCount\":13}}\n\n",
+            "data: {\"error\":{\"code\":429,\"message\":\"Resource has been exhausted\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n",
+        ]);
+
+        assert!(output.contains("event: error"), "missing error event: {output}");
+        assert!(output.contains("\"type\":\"RESOURCE_EXHAUSTED\""));
+        assert!(output.contains("\"message\":\"Resource has been exhausted\""));
+        assert!(!output.contains("event: message_delta"));
+        assert!(!output.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn transport_error_emits_anthropic_error_event_instead_of_io_error() {
+        // 传输层错误不再 yield Err 裸断流，而是先发 Anthropic error 事件。
+        let stream = futures::stream::iter(vec![
+            Ok::<Bytes, std::io::Error>(Bytes::from(
+                "data: {\"responseId\":\"resp_t\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}],\"usageMetadata\":{\"promptTokenCount\":4,\"totalTokenCount\":6}}\n\n"
+                    .to_string(),
+            )),
+            Err(std::io::Error::other("connection reset by upstream")),
+        ]);
+        let converted = create_anthropic_sse_stream_from_gemini(stream, None, None, None, None);
+        let items = futures::executor::block_on(async move { converted.collect::<Vec<_>>().await });
+
+        // 所有产出都必须是 Ok（错误以 SSE 事件形式传达，而非 io::Error 断流）。
+        let output = items
+            .into_iter()
+            .map(|item| {
+                String::from_utf8(
+                    item.expect("converter must not yield Err for transport errors")
+                        .to_vec(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(output.contains("event: error"), "missing error event: {output}");
+        assert!(output.contains("\"type\":\"stream_error\""));
+        assert!(output.contains("connection reset by upstream"));
+        assert!(!output.contains("event: message_stop"));
     }
 }

@@ -8,6 +8,10 @@
 //!
 //! 与 Chat Completions 的 delta chunk 模型完全不同，需要独立的状态机处理。
 
+use super::streaming::{
+    anthropic_error_sse_bytes, detect_upstream_error, extract_upstream_error_fields,
+    UpstreamErrorInfo,
+};
 use super::transform_responses::{
     build_anthropic_usage_from_responses, map_responses_stop_reason,
     sanitize_anthropic_tool_use_input_json,
@@ -118,6 +122,8 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
         let mut tool_name_by_index: HashMap<u32, String> = HashMap::new();
         let mut tool_args_by_index: HashMap<u32, String> = HashMap::new();
         let mut last_tool_index: Option<u32> = None;
+        // 上游已显式报错：终止后只保留 error 事件，不补发成功收尾事件。
+        let mut stream_failed = false;
 
         tokio::pin!(stream);
 
@@ -158,6 +164,20 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                         };
 
                         log::debug!("[Claude/Responses] <<< SSE event: {event_name}");
+
+                        // 通用上游错误负载检测：覆盖不带 event 名的 data-only 错误块
+                        // （如 {"error":{...}}）以及 {"type":"error",...} 形态。
+                        // 正常 Responses 生命周期事件不会在顶层携带非 null 的 error 字段。
+                        if let Some(upstream_error) = detect_upstream_error(&data) {
+                            log::warn!(
+                                "[Claude/Responses] 上游流内错误 ({}): {}",
+                                upstream_error.error_type,
+                                upstream_error.message
+                            );
+                            yield Ok(anthropic_error_sse_bytes(&upstream_error));
+                            stream_failed = true;
+                            break;
+                        }
 
                         match event_name {
                             // ================================================
@@ -602,9 +622,21 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                             }
 
                             // ================================================
-                            // response.reasoning.delta → content_block_delta (thinking_delta)
+                            // reasoning 增量 → content_block_delta (thinking_delta)
+                            //
+                            // 官方事件名（OpenAI Responses，亦是本项目
+                            // streaming_codex_chat 自产流所发）：
+                            //   response.reasoning_summary_text.delta（带 summary_index，无 content_index）
+                            //   response.reasoning_text.delta（带 content_index）
+                            // 非标变体（部分第三方网关）：response.reasoning.delta
+                            //
+                            // summary 事件无 content_index，经 resolve_content_index 走
+                            // fallback_open_index；reasoning_text 事件走 item_id+content_index
+                            // key。两类的 delta/done 解析出同一 index，start/delta/stop 配对成立。
                             // ================================================
-                            "response.reasoning.delta" => {
+                            "response.reasoning.delta"
+                            | "response.reasoning_summary_text.delta"
+                            | "response.reasoning_text.delta" => {
                                 if let Some(delta) = data
                                     .get("delta")
                                     .or_else(|| data.get("text"))
@@ -661,9 +693,12 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                             }
 
                             // ================================================
-                            // response.reasoning.done → content_block_stop
+                            // reasoning 结束 → content_block_stop
+                            // 官方事件名 + 非标变体，与上方 delta 分支一一配对。
                             // ================================================
-                            "response.reasoning.done" => {
+                            "response.reasoning.done"
+                            | "response.reasoning_summary_text.done"
+                            | "response.reasoning_text.done" => {
                                 let key = content_part_key(&data);
                                 let index = if let Some(k) = key {
                                     index_by_key.get(&k).copied()
@@ -688,9 +723,15 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                             }
 
                             // ================================================
-                            // response.completed → message_delta + message_stop
+                            // response.completed / response.incomplete → message_delta + message_stop
+                            //
+                            // incomplete（如 max_output_tokens 截断、content_filter）同样携带
+                            // 最终 usage 与 incomplete_details.reason；map_responses_stop_reason
+                            // 已支持把 status="incomplete" + reason 映射为 max_tokens 等
+                            // stop_reason。此前 incomplete 落入 _ => {}，客户端收不到任何
+                            // 终止事件，只能等连接关闭报"流被截断"。
                             // ================================================
-                            "response.completed" => {
+                            "response.completed" | "response.incomplete" => {
                                 let response_obj = response_object_from_event(&data);
                                 let stop_reason = map_responses_stop_reason(
                                     response_obj.get("status").and_then(|s| s.as_str()),
@@ -767,23 +808,46 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                             "response.output_item.done"
                             | "response.in_progress" => {}
 
+                            // ================================================
+                            // response.failed / error → Anthropic error 事件
+                            //
+                            // 上游 mid-stream 失败必须把真实错误（限流原因、配额等）转发给
+                            // 客户端；此前落入 _ => {}，客户端只能等连接关闭报"流被截断"。
+                            // 终止路径与下方 Err(e) 分支一致：只保留 error 事件，
+                            // 不补发 message_delta/message_stop，避免把失败伪装成成功完成。
+                            // ================================================
+                            "response.failed" | "error" => {
+                                let response_obj = response_object_from_event(&data);
+                                let upstream_error = response_obj
+                                    .get("error")
+                                    .filter(|error| !error.is_null())
+                                    .map(extract_upstream_error_fields)
+                                    .unwrap_or_else(|| extract_upstream_error_fields(&data));
+                                log::warn!(
+                                    "[Claude/Responses] 上游流内错误 ({event_name}): {} ({})",
+                                    upstream_error.message,
+                                    upstream_error.error_type
+                                );
+                                yield Ok(anthropic_error_sse_bytes(&upstream_error));
+                                stream_failed = true;
+                                break;
+                            }
+
                             // Any other unknown/future events — silently skip.
                             _ => {}
                         }
                     }
+
+                    if stream_failed {
+                        break;
+                    }
                 }
                 Err(e) => {
                     log::error!("Responses stream error: {e}");
-                    let error_event = json!({
-                        "type": "error",
-                        "error": {
-                            "type": "stream_error",
-                            "message": format!("Stream error: {e}")
-                        }
-                    });
-                    let sse = format!("event: error\ndata: {}\n\n",
-                        serde_json::to_string(&error_event).unwrap_or_default());
-                    yield Ok(Bytes::from(sse));
+                    yield Ok(anthropic_error_sse_bytes(&UpstreamErrorInfo::new(
+                        "stream_error",
+                        format!("Stream error: {e}"),
+                    )));
                     break;
                 }
             }
@@ -1181,5 +1245,170 @@ mod tests {
             !merged.contains('\u{FFFD}'),
             "output must not contain U+FFFD replacement characters"
         );
+    }
+
+    async fn collect_merged_output(input: &str) -> String {
+        let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
+            input.as_bytes().to_vec(),
+        ))]);
+        let converted = create_anthropic_sse_stream_from_responses(upstream);
+        let chunks: Vec<_> = converted.collect().await;
+        chunks
+            .into_iter()
+            .map(|c| String::from_utf8_lossy(c.unwrap().as_ref()).to_string())
+            .collect::<String>()
+    }
+
+    #[tokio::test]
+    async fn test_response_failed_emits_anthropic_error_event() {
+        // response.failed 携带的真实错误（限流原因等）必须转发为 Anthropic error 事件，
+        // 且不得补发 message_delta/message_stop 把失败伪装成成功。
+        let input = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_f\",\"model\":\"gpt-4o\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"par\"}\n\n",
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_f\",\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached\"}}}\n\n"
+        );
+
+        let merged = collect_merged_output(input).await;
+
+        assert!(merged.contains("event: error"));
+        assert!(merged.contains("\"type\":\"rate_limit_exceeded\""));
+        assert!(merged.contains("\"message\":\"Rate limit reached\""));
+        assert!(!merged.contains("event: message_delta"));
+        assert!(!merged.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn test_data_only_error_block_emits_anthropic_error_event() {
+        // 部分上游把错误作为不带 event 名的 data 块发送。
+        let input = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_e\",\"model\":\"gpt-4o\"}}\n\n",
+            "data: {\"error\":{\"message\":\"quota exceeded\",\"code\":\"insufficient_quota\"}}\n\n"
+        );
+
+        let merged = collect_merged_output(input).await;
+
+        assert!(merged.contains("event: error"));
+        assert!(merged.contains("\"type\":\"insufficient_quota\""));
+        assert!(merged.contains("\"message\":\"quota exceeded\""));
+        assert!(!merged.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn test_response_incomplete_emits_max_tokens_stop() {
+        // response.incomplete 是"带结果的截断"而非硬错误：
+        // 应复用 completed 收尾，stop_reason 映射为 max_tokens。
+        let input = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_i\",\"model\":\"gpt-4o\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial answer\"}\n\n",
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_i\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n\n"
+        );
+
+        let merged = collect_merged_output(input).await;
+
+        assert!(merged.contains("\"stop_reason\":\"max_tokens\""));
+        assert!(merged.contains("\"input_tokens\":7"));
+        assert!(merged.contains("event: content_block_stop"));
+        assert!(merged.contains("event: message_stop"));
+        assert!(!merged.contains("event: error"));
+    }
+
+    #[tokio::test]
+    async fn test_official_reasoning_summary_events_emit_thinking_blocks() {
+        // 官方事件名（也是 streaming_codex_chat 自产流的形态）：
+        // response.reasoning_summary_text.delta/.done，带 summary_index、无 content_index。
+        let input = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_rs\",\"model\":\"gpt-5.5\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
+            "event: response.reasoning_summary_part.added\n",
+            "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+            "event: response.reasoning_summary_text.delta\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"Let me \"}\n\n",
+            "event: response.reasoning_summary_text.delta\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"think...\"}\n\n",
+            "event: response.reasoning_summary_text.done\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"text\":\"Let me think...\"}\n\n",
+            "event: response.content_part.added\n",
+            "data: {\"type\":\"response.content_part.added\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"delta\":\"42\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":10}}}\n\n"
+        );
+
+        let merged = collect_merged_output(input).await;
+
+        let events: Vec<Value> = merged
+            .split("\n\n")
+            .filter_map(|block| {
+                let data = block
+                    .lines()
+                    .find_map(|line| strip_sse_field(line, "data"))?;
+                serde_json::from_str::<Value>(data).ok()
+            })
+            .collect();
+
+        // thinking 块 start/delta/stop 配对
+        let thinking_start = events.iter().position(|e| {
+            e.get("type").and_then(|v| v.as_str()) == Some("content_block_start")
+                && e.pointer("/content_block/type").and_then(|v| v.as_str()) == Some("thinking")
+        });
+        assert!(thinking_start.is_some(), "missing thinking content_block_start");
+        let thinking_deltas: Vec<&str> = events
+            .iter()
+            .filter(|e| e.pointer("/delta/type").and_then(|v| v.as_str()) == Some("thinking_delta"))
+            .filter_map(|e| e.pointer("/delta/thinking").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(thinking_deltas.join(""), "Let me think...");
+
+        // done 必须在 text 开始前关闭 thinking 块
+        let thinking_index = events[thinking_start.unwrap()]
+            .get("index")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        let thinking_stop = events.iter().position(|e| {
+            e.get("type").and_then(|v| v.as_str()) == Some("content_block_stop")
+                && e.get("index").and_then(|v| v.as_u64()) == Some(thinking_index)
+        });
+        let text_start = events.iter().position(|e| {
+            e.get("type").and_then(|v| v.as_str()) == Some("content_block_start")
+                && e.pointer("/content_block/type").and_then(|v| v.as_str()) == Some("text")
+        });
+        assert!(thinking_stop.is_some(), "missing thinking content_block_stop");
+        assert!(text_start.is_some(), "missing text content_block_start");
+        assert!(thinking_stop.unwrap() < text_start.unwrap());
+        assert!(merged.contains("\"text\":\"42\""));
+        assert!(merged.contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn test_official_reasoning_text_events_emit_thinking_blocks() {
+        // 官方完整推理文本事件：response.reasoning_text.delta/.done，带 content_index。
+        let input = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_rt\",\"model\":\"o3\"}}\n\n",
+            "event: response.reasoning_text.delta\n",
+            "data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_2\",\"output_index\":0,\"content_index\":0,\"delta\":\"step one\"}\n\n",
+            "event: response.reasoning_text.done\n",
+            "data: {\"type\":\"response.reasoning_text.done\",\"item_id\":\"rs_2\",\"output_index\":0,\"content_index\":0,\"text\":\"step one\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_2\",\"output_index\":1,\"content_index\":0,\"delta\":\"done\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+        );
+
+        let merged = collect_merged_output(input).await;
+
+        assert!(merged.contains("\"type\":\"thinking\""));
+        assert!(merged.contains("\"thinking\":\"step one\""));
+        assert!(merged.contains("\"text\":\"done\""));
+        assert!(merged.contains("event: message_stop"));
     }
 }

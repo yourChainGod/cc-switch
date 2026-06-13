@@ -183,10 +183,10 @@ describe("SessionManagerPage", () => {
       target: { value: "Alpha" },
     });
 
+    // 搜索词有 200ms 防抖：先等过滤真正生效（Beta 被过滤掉），
+    // 再执行删除，保持"从已过滤结果中删除"的测试意图
     await waitFor(() =>
-      expect(
-        screen.getByRole("heading", { name: "Alpha Session" }),
-      ).toBeInTheDocument(),
+      expect(screen.queryByText("Beta Session")).not.toBeInTheDocument(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: /删除会话/i }));

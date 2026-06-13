@@ -200,61 +200,55 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     atomic_write(path, data.as_bytes())
 }
 
-/// 原子写入：写入临时文件后 rename 替换，避免半写状态
+/// 原子写入：写入同目录临时文件，fsync 后原子替换目标，避免半写状态
+///
+/// - 临时文件必须与目标同目录（rename 跨卷会失败）。
+/// - rename 前对临时文件执行 `sync_all()`，确保掉电后不会出现
+///   “rename 已生效但内容未落盘”的空文件/半写文件。
+/// - 通过 `NamedTempFile::persist` 替换目标：Unix 上是 rename(2)，
+///   Windows 上使用 MOVEFILE_REPLACE_EXISTING 原子覆盖，消除旧实现
+///   “先删后改名”两步之间目标文件彻底消失的窗口。
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
-    let mut tmp = parent.to_path_buf();
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?
-        .to_string_lossy()
-        .to_string();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    tmp.push(format!("{file_name}.tmp.{ts}"));
+    fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
 
-    {
-        let mut f = fs::File::create(&tmp).map_err(|e| AppError::io(&tmp, e))?;
-        f.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
-        f.flush().map_err(|e| AppError::io(&tmp, e))?;
+    if path.file_name().is_none() {
+        return Err(AppError::Config("无效的文件名".to_string()));
     }
+
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| AppError::IoContext {
+        context: format!("创建临时文件失败: {}", parent.display()),
+        source: e,
+    })?;
+    tmp.write_all(data).map_err(|e| AppError::io(tmp.path(), e))?;
+    // 落盘后再 rename，否则掉电时可能出现目标文件已替换但内容丢失
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| AppError::io(tmp.path(), e))?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        // 保留已有目标文件的权限（例如用户手动收紧过的配置文件）；
+        // 目标不存在时沿用 NamedTempFile 的默认 0600（配置可能含密钥，从紧处理）
         if let Ok(meta) = fs::metadata(path) {
-            let perm = meta.permissions().mode();
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
+            let _ = fs::set_permissions(tmp.path(), meta.permissions());
         }
     }
 
-    #[cfg(windows)]
-    {
-        // Windows 上 rename 目标存在会失败，先移除再重命名（尽量接近原子性）
-        if path.exists() {
-            let _ = fs::remove_file(path);
+    // persist 失败时 PersistError 会带回临时文件，闭包结束即自动清理
+    tmp.persist(path).map_err(|e| {
+        let context = format!(
+            "原子替换失败: {} -> {}",
+            e.file.path().display(),
+            path.display()
+        );
+        AppError::IoContext {
+            context,
+            source: e.error,
         }
-        fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-            source: e,
-        })?;
-    }
-
-    #[cfg(not(windows))]
-    {
-        fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-            source: e,
-        })?;
-    }
+    })?;
     Ok(())
 }
 
@@ -387,6 +381,67 @@ mod tests {
             serde_json::to_string(&sorted_a).unwrap(),
             serde_json::to_string(&sorted_b).unwrap(),
         );
+    }
+
+    #[test]
+    fn atomic_write_creates_missing_directory_and_writes_full_content() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let target = dir.path().join("nested").join("deeper").join("config.json");
+        let data = br#"{"model":"claude-sonnet-4-5","env":{"PATH":"/usr/bin"}}"#;
+
+        atomic_write(&target, data).expect("atomic write should succeed");
+
+        assert_eq!(fs::read(&target).expect("read back"), data);
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing_target() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let target = dir.path().join("config.json");
+        fs::write(&target, b"old-content-which-is-much-longer-than-new").expect("seed old file");
+
+        atomic_write(&target, b"new").expect("overwrite should succeed");
+
+        // 内容完整替换（无旧内容残留），且目标始终存在
+        assert_eq!(fs::read(&target).expect("read back"), b"new");
+
+        // 不应留下任何临时文件
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .expect("list dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "config.json")
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected leftovers: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_existing_target_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let target = dir.path().join("config.json");
+        fs::write(&target, b"old").expect("seed old file");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("chmod 600");
+
+        atomic_write(&target, b"new").expect("overwrite should succeed");
+
+        let mode = fs::metadata(&target)
+            .expect("stat target")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "existing permissions should be preserved");
+        assert_eq!(fs::read(&target).expect("read back"), b"new");
+    }
+
+    #[test]
+    fn atomic_write_rejects_path_without_file_name() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let invalid = dir.path().join("..");
+        let err = atomic_write(&invalid, b"data").expect_err("should reject");
+        assert!(matches!(err, AppError::Config(_)));
     }
 }
 

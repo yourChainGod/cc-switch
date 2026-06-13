@@ -2532,7 +2532,18 @@ fn write_claude_config(
     let config_json =
         serde_json::to_string_pretty(&config_obj).map_err(|e| format!("序列化配置失败: {e}"))?;
 
-    std::fs::write(config_file, config_json).map_err(|e| format!("写入配置文件失败: {e}"))
+    std::fs::write(config_file, config_json).map_err(|e| format!("写入配置文件失败: {e}"))?;
+
+    // 配置内含 ANTHROPIC_AUTH_TOKEN 等敏感信息，写入后立即收紧为仅所有者可读写，
+    // 避免默认 umask 下临时目录中的明文 Key 被同机其他用户读取（参照 gemini_config 的 0600 范本）
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(config_file, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("设置配置文件权限失败: {e}"))?;
+    }
+
+    Ok(())
 }
 
 /// macOS: 根据用户首选终端启动
@@ -3250,6 +3261,37 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_claude_config_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_file = temp.path().join("claude_test_provider_0.json");
+        let env_vars = vec![
+            (
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                "sk-test-secret".to_string(),
+            ),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://example.com".to_string(),
+            ),
+        ];
+
+        write_claude_config(&config_file, &env_vars).expect("write config");
+
+        // 内容包含敏感 Key，权限必须是仅所有者可读写（0600）
+        let mode = std::fs::metadata(&config_file)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let content = std::fs::read_to_string(&config_file).expect("read config");
+        assert!(content.contains("ANTHROPIC_AUTH_TOKEN"));
+    }
 
     #[test]
     fn test_extract_version() {

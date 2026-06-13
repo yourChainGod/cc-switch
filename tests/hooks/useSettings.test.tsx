@@ -33,9 +33,16 @@ vi.mock("@/hooks/useSettingsForm", () => ({
   useSettingsForm: () => settingsFormMock,
 }));
 
-vi.mock("@/hooks/useDirectorySettings", () => ({
-  useDirectorySettings: () => directorySettingsMock,
-}));
+// 仅 mock useDirectorySettings hook 本身；保留真实的目录字段映射表与
+// sanitizeDirectorySettingsFields（useSettings 现已表驱动依赖这些导出）
+vi.mock("@/hooks/useDirectorySettings", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/hooks/useDirectorySettings")>();
+  return {
+    ...actual,
+    useDirectorySettings: () => directorySettingsMock,
+  };
+});
 
 vi.mock("@/hooks/useSettingsMetadata", () => ({
   useSettingsMetadata: () => metadataMock,
