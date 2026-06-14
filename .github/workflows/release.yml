@@ -57,6 +57,12 @@ jobs:
         with:
           targets: ${{ matrix.rust-targets }}
 
+      # rust-toolchain.toml 钉死了工具链版本，dtolnay 的 targets 装在 stable 上不生效；
+      # 在仓库目录内显式 add，遵循 toml override，把交叉 target 装到实际使用的工具链上。
+      - name: Add cross-compile Rust target
+        if: matrix.rust-targets != ''
+        run: rustup target add ${{ matrix.rust-targets }}
+
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
