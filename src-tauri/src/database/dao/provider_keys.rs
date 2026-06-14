@@ -2,6 +2,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{
     ProviderConfigKeyBinding, ProviderKey, ProviderKeyInput, ProviderKeyStatus, ProviderKeySummary,
+    UsageScript,
 };
 use chrono::Utc;
 use rusqlite::{params, OptionalExtension, Row};
@@ -23,6 +24,7 @@ fn normalize_config_key_mode(mode: &str) -> Result<&'static str, AppError> {
 
 fn map_provider_key_row(row: &Row<'_>) -> rusqlite::Result<ProviderKey> {
     let status: String = row.get(9)?;
+    let usage_script_raw: Option<String> = row.get(17)?;
     Ok(ProviderKey {
         id: row.get(0)?,
         app_type: row.get(1)?,
@@ -39,6 +41,9 @@ fn map_provider_key_row(row: &Row<'_>) -> rusqlite::Result<ProviderKey> {
         last_failure_at: row.get(12)?,
         last_used_at: row.get(13)?,
         cooldown_until: row.get(14)?,
+        usage_script: usage_script_raw
+            .filter(|s| !s.trim().is_empty())
+            .and_then(|s| serde_json::from_str(&s).ok()),
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
     })
@@ -130,7 +135,11 @@ impl Database {
                         SUM(CASE WHEN enabled = 1 AND status = 'degraded' THEN 1 ELSE 0 END) AS degraded,
                         SUM(CASE WHEN enabled = 1 AND status = 'cooldown' THEN 1 ELSE 0 END) AS cooldown,
                         SUM(CASE WHEN enabled = 0 OR status = 'disabled' THEN 1 ELSE 0 END) AS disabled,
-                        MIN(CASE WHEN enabled = 1 AND status != 'disabled' THEN priority ELSE NULL END) AS min_priority
+                        MIN(CASE WHEN enabled = 1 AND status != 'disabled' THEN priority ELSE NULL END) AS min_priority,
+                        SUM(CASE WHEN usage_script IS NOT NULL
+                                  AND json_valid(usage_script)
+                                  AND json_extract(usage_script, '$.enabled') = 1
+                             THEN 1 ELSE 0 END) AS usage_enabled
                  FROM provider_keys
                  WHERE app_type = ?1
                  GROUP BY app_type, provider_id",
@@ -148,6 +157,7 @@ impl Database {
                     cooldown: row.get(5)?,
                     disabled: row.get(6)?,
                     min_priority: row.get(7)?,
+                    usage_enabled: row.get(8)?,
                 })
             })
             .map_err(|e| AppError::Database(e.to_string()))?
@@ -168,7 +178,7 @@ impl Database {
                 "SELECT id, app_type, provider_id, name, key_value, auth_field,
                         enabled, priority, weight, status, consecutive_failures,
                         last_success_at, last_failure_at, last_used_at, cooldown_until,
-                        created_at, updated_at
+                        created_at, updated_at, usage_script
                  FROM provider_keys
                  WHERE app_type = ?1 AND provider_id = ?2
                  ORDER BY enabled DESC, priority ASC, created_at ASC, id ASC",
@@ -196,7 +206,7 @@ impl Database {
                 "SELECT id, app_type, provider_id, name, key_value, auth_field,
                         enabled, priority, weight, status, consecutive_failures,
                         last_success_at, last_failure_at, last_used_at, cooldown_until,
-                        created_at, updated_at
+                        created_at, updated_at, usage_script
                  FROM provider_keys
                  WHERE app_type = ?1
                    AND provider_id = ?2
@@ -244,7 +254,7 @@ impl Database {
             "SELECT id, app_type, provider_id, name, key_value, auth_field,
                     enabled, priority, weight, status, consecutive_failures,
                     last_success_at, last_failure_at, last_used_at, cooldown_until,
-                    created_at, updated_at
+                    created_at, updated_at, usage_script
              FROM provider_keys
              WHERE id = ?1 AND app_type = ?2 AND provider_id = ?3",
             params![key_id, app_type, provider_id],
@@ -280,6 +290,7 @@ impl Database {
             last_failure_at: None,
             last_used_at: None,
             cooldown_until: None,
+            usage_script: input.usage_script.clone(),
             created_at: now_ts(),
             updated_at: now_ts(),
         };
@@ -288,14 +299,21 @@ impl Database {
     }
 
     pub fn save_provider_key(&self, key: &ProviderKey) -> Result<(), AppError> {
+        let usage_script_json = match &key.usage_script {
+            Some(s) => Some(
+                serde_json::to_string(s)
+                    .map_err(|e| AppError::Database(format!("serialize usage_script: {e}")))?,
+            ),
+            None => None,
+        };
         let conn = lock_conn!(self.conn);
         conn.execute(
             "INSERT OR REPLACE INTO provider_keys (
                 id, app_type, provider_id, name, key_value, auth_field,
                 enabled, priority, weight, status, consecutive_failures,
                 last_success_at, last_failure_at, last_used_at, cooldown_until,
-                created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                created_at, updated_at, usage_script
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 key.id,
                 key.app_type,
@@ -314,6 +332,7 @@ impl Database {
                 key.cooldown_until,
                 key.created_at,
                 key.updated_at,
+                usage_script_json,
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -345,6 +364,25 @@ impl Database {
         } else {
             ProviderKeyStatus::Disabled
         };
+        key.updated_at = now_ts();
+        self.save_provider_key(&key)?;
+        Ok(Some(key))
+    }
+
+    /// 仅更新某个 key 的用量查询配置（不触碰 key 的其他字段，
+    /// 与「切 key / 调优先级」等操作隔离，避免配置漂移）。
+    /// 传 None 表示清除该 key 的用量配置。
+    pub fn set_provider_key_usage_script(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        key_id: &str,
+        usage_script: Option<&UsageScript>,
+    ) -> Result<Option<ProviderKey>, AppError> {
+        let Some(mut key) = self.get_provider_key(app_type, provider_id, key_id)? else {
+            return Ok(None);
+        };
+        key.usage_script = usage_script.cloned();
         key.updated_at = now_ts();
         self.save_provider_key(&key)?;
         Ok(Some(key))

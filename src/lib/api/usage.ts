@@ -13,7 +13,7 @@ import type {
   SessionSyncResult,
   DataSourceSummary,
 } from "@/types/usage";
-import type { UsageResult } from "@/types";
+import type { UsageResult, ProviderKey, UsageScript } from "@/types";
 import type { AppId } from "./types";
 import type { TemplateType } from "@/config/constants";
 
@@ -44,6 +44,38 @@ export const usageApi = {
       accessToken,
       userId,
       templateType,
+    });
+  },
+
+  // 聚合查询：自定义供应商所有「启用用量查询」的 key 求和
+  queryAggregated: async (
+    providerId: string,
+    appId: AppId,
+  ): Promise<UsageResult> => {
+    return invoke("queryProviderUsageAggregated", { providerId, app: appId });
+  },
+
+  // 查询单个 key 的用量（Key 池对话框内显示/手动刷新）
+  queryKey: async (
+    providerId: string,
+    keyId: string,
+    appId: AppId,
+  ): Promise<UsageResult> => {
+    return invoke("queryProviderKeyUsage", { providerId, keyId, app: appId });
+  },
+
+  // 设置/清除单个 key 的用量查询配置（传 null 清除）
+  setKeyUsageScript: async (
+    providerId: string,
+    keyId: string,
+    appId: AppId,
+    usageScript: UsageScript | null,
+  ): Promise<ProviderKey | null> => {
+    return invoke("setProviderKeyUsageScript", {
+      providerId,
+      keyId,
+      app: appId,
+      usageScript,
     });
   },
 

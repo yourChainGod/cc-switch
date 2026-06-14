@@ -384,6 +384,9 @@ pub struct ProviderKey {
     pub last_used_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_until: Option<i64>,
+    /// 该 key 独立的用量查询配置（自定义供应商下沉到 key 级；官方/订阅类仍用 provider.meta）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_script: Option<UsageScript>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -399,6 +402,8 @@ pub struct ProviderKeySummary {
     pub cooldown: i64,
     pub disabled: i64,
     pub min_priority: Option<i64>,
+    /// 启用了用量查询（usage_script.enabled）的 key 数；> 0 时卡片显示聚合用量
+    pub usage_enabled: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +419,8 @@ pub struct ProviderKeyInput {
     pub priority: i64,
     #[serde(default = "default_provider_key_weight")]
     pub weight: i64,
+    #[serde(default)]
+    pub usage_script: Option<UsageScript>,
 }
 
 fn default_provider_key_enabled() -> bool {

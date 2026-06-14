@@ -1,5 +1,6 @@
 use cc_switch_lib::{
     AppState, AppType, Database, Provider, ProviderKeyInput, ProviderMeta, ProviderService,
+    UsageScript,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -37,6 +38,7 @@ fn provider_key_pool_crud_and_cascade_delete() {
                 enabled: true,
                 priority: 20,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert later key");
@@ -51,6 +53,7 @@ fn provider_key_pool_crud_and_cascade_delete() {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert earlier key");
@@ -86,6 +89,7 @@ fn provider_key_pool_crud_and_cascade_delete() {
                 enabled: true,
                 priority: 5,
                 weight: 2,
+                usage_script: None,
             },
         )
         .expect("update key")
@@ -139,6 +143,7 @@ fn provider_key_summaries_return_aggregate_health_without_key_values() {
             enabled: true,
             priority: 5,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("insert active key");
@@ -153,6 +158,7 @@ fn provider_key_summaries_return_aggregate_health_without_key_values() {
                 enabled: true,
                 priority: 20,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert cooldown key");
@@ -167,6 +173,7 @@ fn provider_key_summaries_return_aggregate_health_without_key_values() {
                 enabled: true,
                 priority: 30,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert degraded key");
@@ -180,6 +187,7 @@ fn provider_key_summaries_return_aggregate_health_without_key_values() {
             enabled: false,
             priority: 0,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("insert disabled key");
@@ -242,6 +250,7 @@ fn config_key_binding_writes_provider_config_and_repairs_when_disabled() {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert first key");
@@ -256,6 +265,7 @@ fn config_key_binding_writes_provider_config_and_repairs_when_disabled() {
                 enabled: true,
                 priority: 20,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert second key");
@@ -296,6 +306,7 @@ fn config_key_binding_writes_provider_config_and_repairs_when_disabled() {
             enabled: false,
             priority: 10,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("disable first key");
@@ -386,6 +397,7 @@ fn config_key_switch_only_patches_auth_key_and_binding_meta() {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert provider key");
@@ -453,6 +465,7 @@ fn save_provider_does_not_overwrite_config_key_binding_from_meta() {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert first key");
@@ -467,6 +480,7 @@ fn save_provider_does_not_overwrite_config_key_binding_from_meta() {
                 enabled: true,
                 priority: 20,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert stale key");
@@ -547,6 +561,7 @@ fn add_key_auto_config_follows_highest_priority_available_key() {
             enabled: true,
             priority: 20,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("add lower priority key");
@@ -587,6 +602,7 @@ fn add_key_auto_config_follows_highest_priority_available_key() {
             enabled: true,
             priority: 5,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("add higher priority key");
@@ -628,6 +644,7 @@ fn add_key_auto_config_follows_highest_priority_available_key() {
             enabled: true,
             priority: 5,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("update higher priority key");
@@ -699,6 +716,7 @@ fn manual_config_key_does_not_follow_higher_priority_key() {
             enabled: true,
             priority: 20,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("add manual key");
@@ -716,6 +734,7 @@ fn manual_config_key_does_not_follow_higher_priority_key() {
             enabled: true,
             priority: 5,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("add higher priority key");
@@ -731,6 +750,7 @@ fn manual_config_key_does_not_follow_higher_priority_key() {
             enabled: true,
             priority: 1,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("update higher priority key");
@@ -803,6 +823,7 @@ fn set_config_key_auto_switches_manual_binding_back_to_highest_priority_key() {
             enabled: true,
             priority: 20,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("add manual key");
@@ -820,6 +841,7 @@ fn set_config_key_auto_switches_manual_binding_back_to_highest_priority_key() {
             enabled: true,
             priority: 1,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("add auto key");
@@ -883,6 +905,7 @@ fn config_key_binding_clears_direct_config_when_last_key_disabled() {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert only key");
@@ -900,6 +923,7 @@ fn config_key_binding_clears_direct_config_when_last_key_disabled() {
             enabled: false,
             priority: 10,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("disable only key");
@@ -964,6 +988,7 @@ fn config_key_binding_clears_direct_config_when_last_key_deleted() {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert only key");
@@ -1089,6 +1114,7 @@ fn provider_update_reuses_existing_key_pool_value_as_config_key() {
                 enabled: false,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert pooled key");
@@ -1241,6 +1267,7 @@ experimental_bearer_token = "sk-old"
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert codex key");
@@ -1424,6 +1451,7 @@ fn rate_limit_grace_keeps_key_in_rotation_before_cooldown() {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert key");
@@ -1533,6 +1561,7 @@ fn zero_grace_cooldown_keeps_legacy_backoff_semantics() {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .expect("insert key");
@@ -1582,6 +1611,7 @@ fn earliest_recovery_secs_reports_minimum_enabled_cooldown() {
         enabled: true,
         priority,
         weight: 1,
+        usage_script: None,
     };
     let short = db
         .add_provider_key(app_type, "provider-a", &mk_key("short", 10))
@@ -1618,6 +1648,7 @@ fn earliest_recovery_secs_reports_minimum_enabled_cooldown() {
             enabled: false,
             priority: 30,
             weight: 1,
+            usage_script: None,
         },
     )
     .expect("disable key");
@@ -1629,5 +1660,202 @@ fn earliest_recovery_secs_reports_minimum_enabled_cooldown() {
     assert!(
         (1..=60).contains(&secs),
         "earliest should be short key's ≈60s, got {secs}s"
+    );
+}
+
+#[test]
+fn provider_key_usage_script_roundtrip_and_isolated_from_updates() {
+    let db = Database::memory().expect("create memory database");
+    let app_type = AppType::Claude.as_str();
+
+    let provider = Provider {
+        id: "provider-a".to_string(),
+        name: "Provider A".to_string(),
+        settings_config: json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
+        website_url: None,
+        category: Some("third_party".to_string()),
+        created_at: Some(1),
+        sort_index: Some(1),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider(app_type, &provider)
+        .expect("save provider fixture");
+
+    let usage = UsageScript {
+        enabled: true,
+        language: "javascript".to_string(),
+        code: "({ extractor: (r) => ({ remaining: 1 }) })".to_string(),
+        timeout: Some(15),
+        api_key: None,
+        base_url: Some("https://usage.example.com".to_string()),
+        access_token: None,
+        user_id: None,
+        template_type: Some("general".to_string()),
+        auto_query_interval: None,
+        coding_plan_provider: None,
+    };
+
+    let key = db
+        .add_provider_key(
+            app_type,
+            "provider-a",
+            &ProviderKeyInput {
+                name: "k1".to_string(),
+                key_value: "sk-k1".to_string(),
+                auth_field: None,
+                enabled: true,
+                priority: 0,
+                weight: 1,
+                usage_script: Some(usage.clone()),
+            },
+        )
+        .expect("add key with usage script");
+
+    // 往返：读回与写入一致
+    let fetched = db
+        .get_provider_key(app_type, "provider-a", &key.id)
+        .expect("get key")
+        .expect("key exists");
+    let us = fetched
+        .usage_script
+        .as_ref()
+        .expect("usage_script should round-trip");
+    assert!(us.enabled);
+    assert_eq!(us.timeout, Some(15));
+    assert_eq!(us.base_url.as_deref(), Some("https://usage.example.com"));
+    assert_eq!(us.template_type.as_deref(), Some("general"));
+
+    // update_provider_key 改其他字段（input.usage_script=None），但必须保留已存配置
+    db.update_provider_key(
+        app_type,
+        "provider-a",
+        &key.id,
+        &ProviderKeyInput {
+            name: "k1-renamed".to_string(),
+            key_value: "sk-k1-new".to_string(),
+            auth_field: None,
+            enabled: true,
+            priority: 7,
+            weight: 3,
+            usage_script: None,
+        },
+    )
+    .expect("update key")
+    .expect("key exists");
+
+    let after_update = db
+        .get_provider_key(app_type, "provider-a", &key.id)
+        .expect("get key")
+        .expect("key exists");
+    assert_eq!(after_update.name, "k1-renamed");
+    assert_eq!(after_update.key_value, "sk-k1-new");
+    assert!(
+        after_update.usage_script.is_some(),
+        "update_provider_key must NOT wipe usage_script (切 key/调优先级不漂移用量配置)"
+    );
+    assert_eq!(after_update.usage_script.as_ref().unwrap().timeout, Some(15));
+
+    // set_provider_key_usage_script(None) 显式清除，且不动其他字段
+    db.set_provider_key_usage_script(app_type, "provider-a", &key.id, None)
+        .expect("clear usage script")
+        .expect("key exists");
+    let cleared = db
+        .get_provider_key(app_type, "provider-a", &key.id)
+        .expect("get key")
+        .expect("key exists");
+    assert!(
+        cleared.usage_script.is_none(),
+        "set_provider_key_usage_script(None) should clear config"
+    );
+    assert_eq!(cleared.name, "k1-renamed");
+    assert_eq!(cleared.priority, 7);
+}
+
+#[test]
+fn provider_key_summary_counts_usage_enabled_keys() {
+    let db = Database::memory().expect("create memory database");
+    let app_type = AppType::Claude.as_str();
+
+    let provider = Provider {
+        id: "provider-a".to_string(),
+        name: "Provider A".to_string(),
+        settings_config: json!({"env": {}}),
+        website_url: None,
+        category: Some("third_party".to_string()),
+        created_at: Some(1),
+        sort_index: Some(1),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider(app_type, &provider)
+        .expect("save provider fixture");
+
+    let enabled_usage = UsageScript {
+        enabled: true,
+        language: "javascript".to_string(),
+        code: "({})".to_string(),
+        timeout: None,
+        api_key: None,
+        base_url: None,
+        access_token: None,
+        user_id: None,
+        template_type: Some("general".to_string()),
+        auto_query_interval: None,
+        coding_plan_provider: None,
+    };
+    let disabled_usage = UsageScript {
+        enabled: false,
+        ..enabled_usage.clone()
+    };
+
+    let mk = |name: &str, key: &str, priority: i64, usage: Option<UsageScript>| {
+        ProviderKeyInput {
+            name: name.to_string(),
+            key_value: key.to_string(),
+            auth_field: None,
+            enabled: true,
+            priority,
+            weight: 1,
+            usage_script: usage,
+        }
+    };
+
+    db.add_provider_key(
+        app_type,
+        "provider-a",
+        &mk("k1", "sk1", 0, Some(enabled_usage.clone())),
+    )
+    .expect("k1");
+    db.add_provider_key(
+        app_type,
+        "provider-a",
+        &mk("k2", "sk2", 1, Some(enabled_usage.clone())),
+    )
+    .expect("k2");
+    db.add_provider_key(
+        app_type,
+        "provider-a",
+        &mk("k3", "sk3", 2, Some(disabled_usage.clone())),
+    )
+    .expect("k3");
+    db.add_provider_key(app_type, "provider-a", &mk("k4", "sk4", 3, None))
+        .expect("k4");
+
+    let summaries = db
+        .get_provider_key_summaries(app_type)
+        .expect("load key summaries");
+    assert_eq!(summaries.len(), 1);
+    let summary = &summaries[0];
+    assert_eq!(summary.total, 4);
+    assert_eq!(
+        summary.usage_enabled, 2,
+        "only keys with usage_script.enabled == true should count"
     );
 }

@@ -462,6 +462,11 @@ impl Database {
                         Self::migrate_v13_to_v14(conn)?;
                         Self::set_user_version(conn, 14)?;
                     }
+                    14 => {
+                        log::info!("迁移数据库从 v14 到 v15（用量查询配置下沉到 Key）");
+                        Self::migrate_v14_to_v15(conn)?;
+                        Self::set_user_version(conn, 15)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -1268,6 +1273,133 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v14_to_v15(conn: &Connection) -> Result<(), AppError> {
+        Self::add_provider_keys_usage_script_column(conn)?;
+        Self::migrate_usage_script_from_provider_meta_to_keys(conn)?;
+        log::info!("v14 -> v15 迁移完成：用量查询配置已下沉到 Key");
+        Ok(())
+    }
+
+    /// 给 provider_keys 增加 usage_script 列（幂等：已存在则跳过）。
+    fn add_provider_keys_usage_script_column(conn: &Connection) -> Result<(), AppError> {
+        let already_exists = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(provider_keys)")
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| AppError::Database(e.to_string()))?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            names.iter().any(|name| name == "usage_script")
+        };
+        if !already_exists {
+            conn.execute("ALTER TABLE provider_keys ADD COLUMN usage_script TEXT", [])
+                .map_err(|e| {
+                    AppError::Database(format!("为 provider_keys 添加 usage_script 列失败: {e}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// 把非官方供应商 meta.usage_script（通用脚本/余额类）下沉到该供应商所有 key，
+    /// 并从 provider meta 清除该字段。官方/订阅类（official_subscription / token_plan）原样保留。
+    /// key 上的副本清空 apiKey，使查询时回退到各 key 自身的 keyValue。
+    fn migrate_usage_script_from_provider_meta_to_keys(
+        conn: &Connection,
+    ) -> Result<(), AppError> {
+        let mut stmt = conn
+            .prepare("SELECT id, app_type, category, meta FROM providers")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // (app_type, provider_id, usage_script_json) — 写入该供应商所有 key
+        let mut key_updates: Vec<(String, String, String)> = Vec::new();
+        // (meta_json, provider_id, app_type) — 清除 provider meta.usage_script
+        let mut meta_updates: Vec<(String, String, String)> = Vec::new();
+
+        for row in rows {
+            let (provider_id, app_type, category, meta_str) =
+                row.map_err(|e| AppError::Database(e.to_string()))?;
+
+            // 官方供应商：用量查询保持供应商级，不下沉
+            if category.as_deref() == Some("official") {
+                continue;
+            }
+            let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&meta_str) else {
+                continue;
+            };
+            let Some(usage) = meta.get("usage_script").cloned() else {
+                continue;
+            };
+
+            // 仅下沉「启用」且非官方/订阅模板的用量配置
+            let enabled = usage
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !enabled {
+                continue;
+            }
+            let template = usage
+                .get("templateType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if matches!(template, "official_subscription" | "token_plan") {
+                continue;
+            }
+
+            // 复制到 key 的副本：清空 apiKey，让查询回退到各 key 的 keyValue
+            let mut usage_for_key = usage.clone();
+            if let Some(obj) = usage_for_key.as_object_mut() {
+                obj.remove("apiKey");
+            }
+            let usage_json = serde_json::to_string(&usage_for_key)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            key_updates.push((app_type.clone(), provider_id.clone(), usage_json));
+
+            // 从 provider meta 清除 usage_script
+            if let Some(obj) = meta.as_object_mut() {
+                obj.remove("usage_script");
+            }
+            let meta_json =
+                serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?;
+            meta_updates.push((meta_json, provider_id, app_type));
+        }
+        drop(stmt);
+
+        for (app_type, provider_id, usage_json) in key_updates {
+            conn.execute(
+                "UPDATE provider_keys SET usage_script = ?1
+                 WHERE app_type = ?2 AND provider_id = ?3",
+                params![usage_json, app_type, provider_id],
+            )
+            .map_err(|e| AppError::Database(format!("下沉用量配置到 key 失败: {e}")))?;
+        }
+
+        for (meta, provider_id, app_type) in meta_updates {
+            conn.execute(
+                "UPDATE providers SET meta = ?1 WHERE id = ?2 AND app_type = ?3",
+                params![meta, provider_id, app_type],
+            )
+            .map_err(|e| {
+                AppError::Database(format!("清理 provider meta 中 usage_script 失败: {e}"))
+            })?;
+        }
+
+        Ok(())
+    }
+
     fn create_provider_keys_table(conn: &Connection) -> Result<(), AppError> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS provider_keys (
@@ -1288,6 +1420,7 @@ impl Database {
                 cooldown_until INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
+                usage_script TEXT,
                 FOREIGN KEY (provider_id, app_type)
                     REFERENCES providers(id, app_type) ON DELETE CASCADE
             )",

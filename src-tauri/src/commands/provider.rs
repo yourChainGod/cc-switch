@@ -770,6 +770,83 @@ pub async fn testUsageScript(
     .map_err(|e| e.to_string())
 }
 
+/// 聚合查询自定义供应商所有「启用用量查询」的 key 的用量（求和）。
+/// 仿 `queryProviderUsage` 同款包装：写入 UsageCache + emit + 刷新托盘。
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn queryProviderUsageAggregated(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    #[allow(non_snake_case)] providerId: String,
+    app: String,
+) -> Result<crate::provider::UsageResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let inner = ProviderService::aggregate_provider_usage(&state, app_type.clone(), &providerId)
+        .await
+        .map_err(|e| e.to_string());
+    let snapshot = match &inner {
+        Ok(r) => r.clone(),
+        Err(err_msg) => crate::provider::UsageResult {
+            success: false,
+            data: None,
+            error: Some(err_msg.clone()),
+        },
+    };
+    let payload = serde_json::json!({
+        "kind": "script",
+        "appType": app_type.as_str(),
+        "providerId": &providerId,
+        "data": &snapshot,
+    });
+    if let Err(e) = app_handle.emit("usage-cache-updated", payload) {
+        log::error!("emit usage-cache-updated (aggregated) 失败: {e}");
+    }
+    state.usage_cache.put_script(app_type, providerId, snapshot);
+    crate::tray::schedule_tray_refresh(&app_handle);
+    inner
+}
+
+/// 查询单个 key 的用量（Key 池对话框内显示 / 手动刷新用）。
+#[allow(non_snake_case)]
+#[tauri::command]
+pub async fn queryProviderKeyUsage(
+    state: State<'_, AppState>,
+    #[allow(non_snake_case)] providerId: String,
+    #[allow(non_snake_case)] keyId: String,
+    app: String,
+) -> Result<crate::provider::UsageResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    ProviderService::query_key_usage(state.inner(), app_type, &providerId, &keyId)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 设置/清除单个 key 的用量查询配置（前端保存用量配置的唯一入口）。
+///
+/// 专走隔离的 DAO `set_provider_key_usage_script`，**不能**复用
+/// `update_provider_key`——后者不触碰 usage_script，以保证「切 key/调优先级」
+/// 不会清空用量配置。`usageScript` 传 `null` 表示清除该 key 的配置。
+#[allow(non_snake_case)]
+#[tauri::command]
+pub fn setProviderKeyUsageScript(
+    state: State<'_, AppState>,
+    #[allow(non_snake_case)] providerId: String,
+    #[allow(non_snake_case)] keyId: String,
+    app: String,
+    #[allow(non_snake_case)] usageScript: Option<crate::provider::UsageScript>,
+) -> Result<Option<ProviderKey>, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    state
+        .db
+        .set_provider_key_usage_script(
+            app_type.as_str(),
+            &providerId,
+            &keyId,
+            usageScript.as_ref(),
+        )
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn read_live_provider_settings(app: String) -> Result<serde_json::Value, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;

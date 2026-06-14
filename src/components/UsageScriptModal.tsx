@@ -3,7 +3,7 @@ import { Play, Wand2, Eye, EyeOff, Save } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
-import { Provider, UsageScript, UsageData, createUsageScript } from "@/types";
+import { Provider, ProviderKey, UsageScript, UsageData, createUsageScript } from "@/types";
 import { usageApi, settingsApi, type AppId } from "@/lib/api";
 import { useSettingsQuery } from "@/lib/query";
 import {
@@ -34,6 +34,8 @@ interface UsageScriptModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (script: UsageScript) => void;
+  /** key 级模式：传入则配置该 key 的用量脚本，凭证默认用 key.keyValue，隐藏官方/订阅模板 */
+  providerKey?: ProviderKey;
 }
 
 // 生成预设模板的函数（支持国际化）
@@ -184,11 +186,14 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  providerKey,
 }) => {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data: settingsData } = useSettingsQuery();
   const [showUsageConfirm, setShowUsageConfirm] = useState(false);
+  // key 级模式：配置单个 key 的用量脚本（凭证默认 key.keyValue，隐藏官方/订阅类模板）
+  const isKeyLevel = !!providerKey;
 
   // 生成带国际化的预设模板
   const PRESET_TEMPLATES = generatePresetTemplates(t);
@@ -271,16 +276,37 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
     // Trim the trailing slash to mirror the backend resolver
     // (Provider::resolve_usage_credentials), so `{{baseUrl}}/path` never
     // produces a double slash regardless of which path runs the query.
+    // key 级模式：apiKey 默认取该 key 的 keyValue（baseUrl 仍取供应商配置）
+    if (isKeyLevel && providerKey) {
+      return {
+        apiKey: providerKey.keyValue,
+        baseUrl: trimTrailingSlash(raw.baseUrl),
+      };
+    }
     return { apiKey: raw.apiKey, baseUrl: trimTrailingSlash(raw.baseUrl) };
   };
 
   const providerCredentials = getProviderCredentials();
-  const isOfficialSubscription = isOfficialSubscriptionProvider(
-    provider,
-    appId,
-  );
+  const isOfficialSubscription =
+    !isKeyLevel && isOfficialSubscriptionProvider(provider, appId);
 
   const [script, setScript] = useState<UsageScript>(() => {
+    // key 级模式：从 providerKey.usageScript 读取，不支持官方/订阅类模板
+    if (isKeyLevel) {
+      const saved = providerKey?.usageScript;
+      if (saved) {
+        const normalized = createUsageScript(saved);
+        if (NATIVE_USAGE_TEMPLATES.has(normalized.templateType || "")) {
+          return createUsageScript({
+            code: PRESET_TEMPLATES[TEMPLATE_TYPES.GENERAL],
+          });
+        }
+        return normalized;
+      }
+      return createUsageScript({
+        code: PRESET_TEMPLATES[TEMPLATE_TYPES.GENERAL],
+      });
+    }
     const savedScript = provider.meta?.usage_script;
     if (savedScript) {
       const normalizedScript = createUsageScript(savedScript);
@@ -373,6 +399,18 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
 
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(
     () => {
+      // key 级模式：仅脚本类模板，从 providerKey.usageScript.templateType 推断
+      if (isKeyLevel) {
+        const saved = providerKey?.usageScript;
+        const tt = saved?.templateType;
+        if (tt && !NATIVE_USAGE_TEMPLATES.has(tt)) {
+          return tt as string;
+        }
+        if (saved?.accessToken || saved?.userId) {
+          return TEMPLATE_TYPES.NEW_API;
+        }
+        return TEMPLATE_TYPES.GENERAL;
+      }
       const existingScript = provider.meta?.usage_script;
       // 优先使用保存的 templateType
       if (
@@ -557,13 +595,20 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         return;
       }
 
+      // key 级模式：测试凭证回退到该 key 的 keyValue / 供应商 baseUrl
+      const testApiKey = isKeyLevel
+        ? script.apiKey || providerCredentials.apiKey
+        : script.apiKey;
+      const testBaseUrl = isKeyLevel
+        ? script.baseUrl || providerCredentials.baseUrl
+        : script.baseUrl;
       const result = await usageApi.testScript(
         provider.id,
         appId,
         script.code,
         script.timeout,
-        script.apiKey,
-        script.baseUrl,
+        testApiKey,
+        testBaseUrl,
         script.accessToken,
         script.userId,
         selectedTemplate as "custom" | "general" | "newapi" | undefined,
@@ -583,8 +628,15 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           closeButton: true,
         });
 
-        // 🔧 测试成功后，更新主界面列表的用量查询缓存
-        queryClient.setQueryData(["usage", provider.id, appId], result);
+        // 🔧 测试成功后，更新对应的用量查询缓存（key 级写 key 缓存）
+        if (isKeyLevel && providerKey) {
+          queryClient.setQueryData(
+            ["usage", "key", provider.id, providerKey.id, appId],
+            result,
+          );
+        } else {
+          queryClient.setQueryData(["usage", provider.id, appId], result);
+        }
       } else {
         toast.error(
           `${t("usageScript.testFailed")}: ${result.error || t("endpointTest.noResult")}`,
@@ -756,7 +808,11 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   return (
     <FullScreenPanel
       isOpen={isOpen}
-      title={`${t("usageScript.title")} - ${provider.name}`}
+      title={
+        isKeyLevel && providerKey
+          ? `${t("usageScript.title")} - ${provider.name} / ${providerKey.name}`
+          : `${t("usageScript.title")} - ${provider.name}`
+      }
       onClose={onClose}
       footer={footer}
     >
@@ -781,6 +837,10 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
             <div className="flex gap-2 flex-wrap">
               {Object.keys(PRESET_TEMPLATES)
                 .filter((name) => {
+                  // key 级模式：仅脚本类模板（隐藏官方/订阅/Coding Plan/Balance）
+                  if (isKeyLevel) {
+                    return !NATIVE_USAGE_TEMPLATES.has(name);
+                  }
                   // 官方 CLI/OAuth 供应商只显示官方订阅额度模板
                   if (isOfficialSubscription) {
                     return name === TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION;

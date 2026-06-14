@@ -52,7 +52,7 @@ pub use mcp::{
 };
 pub use provider::{
     Provider, ProviderConfigKeyBinding, ProviderKey, ProviderKeyInput, ProviderKeyStatus,
-    ProviderMeta,
+    ProviderMeta, UsageScript,
 };
 pub use services::{
     skill::{migrate_skills_to_ssot, ImportSkillSelection},
@@ -1190,6 +1190,9 @@ pub fn run() {
             commands::validate_mcp_command,
             // usage query
             commands::queryProviderUsage,
+            commands::queryProviderUsageAggregated,
+            commands::queryProviderKeyUsage,
+            commands::setProviderKeyUsageScript,
             commands::testUsageScript,
             // subscription quota
             commands::get_subscription_quota,

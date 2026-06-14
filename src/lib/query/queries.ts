@@ -134,6 +134,68 @@ export const useUsageQuery = (
   };
 };
 
+/**
+ * 自定义供应商聚合用量查询（各 key 求和）。
+ * 与 useUsageQuery 同款 staleTime/refetchInterval 策略，仅 queryKey/queryFn 不同。
+ */
+export const useAggregatedUsageQuery = (
+  providerId: string,
+  appId: AppId,
+  options?: UseUsageQueryOptions,
+) => {
+  const { enabled = true, autoQueryInterval = 0 } = options || {};
+
+  const staleTime =
+    autoQueryInterval > 0 ? autoQueryInterval * 60 * 1000 : 5 * 60 * 1000;
+
+  const query = useQuery<UsageResult>({
+    queryKey: usageKeys.aggregated(providerId, appId),
+    queryFn: async () => usageApi.queryAggregated(providerId, appId),
+    enabled: enabled && !!providerId,
+    refetchInterval:
+      autoQueryInterval > 0
+        ? Math.max(autoQueryInterval, 1) * 60 * 1000
+        : false,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: false,
+    retry: false,
+    staleTime,
+    gcTime: 10 * 60 * 1000,
+  });
+
+  return {
+    ...query,
+    lastQueriedAt: query.dataUpdatedAt || null,
+  };
+};
+
+/**
+ * 单个 key 的用量查询（Key 池对话框徽章用，手动刷新为主，不自动轮询）。
+ */
+export const useKeyUsageQuery = (
+  providerId: string,
+  keyId: string,
+  appId: AppId,
+  options?: { enabled?: boolean },
+) => {
+  const { enabled = true } = options || {};
+
+  const query = useQuery<UsageResult>({
+    queryKey: usageKeys.keyUsage(providerId, keyId, appId),
+    queryFn: async () => usageApi.queryKey(providerId, keyId, appId),
+    enabled: enabled && !!providerId && !!keyId,
+    refetchOnWindowFocus: false,
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
+
+  return {
+    ...query,
+    lastQueriedAt: query.dataUpdatedAt || null,
+  };
+};
+
 export const useSessionsQuery = () => {
   return useQuery<SessionMeta[]>({
     queryKey: ["sessions"],

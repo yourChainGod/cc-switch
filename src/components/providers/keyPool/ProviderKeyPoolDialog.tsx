@@ -1,11 +1,14 @@
 import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  AlertCircle,
+  BarChart3,
   Copy,
   KeyRound,
   ListRestart,
   Plus,
   RefreshCcw,
+  RefreshCw,
   RotateCcw,
   Star,
   TimerOff,
@@ -29,6 +32,8 @@ import { Textarea } from "@/components/ui/textarea";
 import type { ProviderKey } from "@/types";
 import { cn } from "@/lib/utils";
 import { copyText } from "@/lib/clipboard";
+import { useKeyUsageQuery } from "@/lib/query/queries";
+import type { AppId } from "@/lib/api";
 
 /**
  * Key 池管理弹窗
@@ -58,6 +63,8 @@ export interface ProviderKeyPoolController {
   resetAllKeys: () => void;
   setConfigKey: (key: ProviderKey) => void;
   setConfigKeyAuto: () => void;
+  /** 打开该 key 的用量查询配置弹窗（key 级 UsageScriptModal） */
+  configureKeyUsage: (key: ProviderKey) => void;
 }
 
 interface ProviderKeyPoolDialogProps {
@@ -71,6 +78,86 @@ function parseIntegerInput(value: string, fallback: number, min?: number) {
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed)) return fallback;
   return min === undefined ? parsed : Math.max(min, parsed);
+}
+
+/** Key 行内联用量徽章：仅对「启用用量查询」的 key 显示，手动刷新为主 */
+function KeyUsageInline({ providerKey }: { providerKey: ProviderKey }) {
+  const { t } = useTranslation();
+  const enabled = providerKey.usageScript?.enabled === true;
+  const { data, isFetching, refetch } = useKeyUsageQuery(
+    providerKey.providerId,
+    providerKey.id,
+    providerKey.appType as AppId,
+    { enabled },
+  );
+
+  if (!enabled) return null;
+
+  const refreshBtn = (
+    <button
+      type="button"
+      onClick={() => void refetch()}
+      disabled={isFetching}
+      className="rounded p-0.5 text-muted-foreground hover:bg-muted disabled:opacity-50"
+      title={t("usage.refreshUsage", { defaultValue: "刷新用量" })}
+    >
+      <RefreshCw className={cn("h-3 w-3", isFetching && "animate-spin")} />
+    </button>
+  );
+
+  if (!data) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        <BarChart3 className="h-3 w-3" />
+        {refreshBtn}
+      </span>
+    );
+  }
+
+  if (!data.success) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-red-500 dark:text-red-400">
+        <AlertCircle className="h-3 w-3" />
+        <span title={data.error || undefined}>
+          {t("usage.queryFailed", { defaultValue: "查询失败" })}
+        </span>
+        {refreshBtn}
+      </span>
+    );
+  }
+
+  const first = data.data?.[0];
+  if (!first) return null;
+
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5 text-xs">
+      <BarChart3 className="h-3 w-3 text-muted-foreground" />
+      {first.used !== undefined && (
+        <span className="text-muted-foreground">
+          {t("usage.used", { defaultValue: "已用" })}{" "}
+          <span className="tabular-nums">{first.used.toFixed(2)}</span>
+        </span>
+      )}
+      {first.remaining !== undefined && (
+        <span className="font-semibold tabular-nums text-green-600 dark:text-green-400">
+          {t("usage.remaining", { defaultValue: "剩余" })}{" "}
+          {first.remaining.toFixed(2)}
+        </span>
+      )}
+      {first.unit && (
+        <span className="text-muted-foreground">{first.unit}</span>
+      )}
+      {first.extra && (
+        <span
+          className="truncate text-muted-foreground"
+          title={first.extra}
+        >
+          {first.extra}
+        </span>
+      )}
+      {refreshBtn}
+    </span>
+  );
 }
 
 export function ProviderKeyPoolDialog({
@@ -311,6 +398,11 @@ export function ProviderKeyPoolDialog({
                         </span>
                       )}
                     </div>
+                    {key.usageScript?.enabled && (
+                      <div className="flex min-w-0 items-center">
+                        <KeyUsageInline providerKey={key} />
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 sm:justify-end">
                     <span className="hidden text-xs text-muted-foreground sm:inline">
@@ -330,6 +422,20 @@ export function ProviderKeyPoolDialog({
                     />
                   </div>
                   <div className="col-span-2 flex items-center justify-end gap-1 sm:col-span-1">
+                    <Button
+                      type="button"
+                      variant={key.usageScript?.enabled ? "secondary" : "ghost"}
+                      size="icon"
+                      onClick={() => pool.configureKeyUsage(key)}
+                      aria-label={t("providerKeys.configureUsage", {
+                        defaultValue: "Usage query",
+                      })}
+                      title={t("providerKeys.configureUsage", {
+                        defaultValue: "Usage query",
+                      })}
+                    >
+                      <BarChart3 className="h-4 w-4" />
+                    </Button>
                     <Button
                       type="button"
                       variant={

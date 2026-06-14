@@ -182,6 +182,214 @@ pub async fn query_usage(
     .await
 }
 
+/// Query usage for a single key.
+///
+/// 凭证优先级：`usage_script.apiKey` → 该 key 的 `key_value`（核心：默认用该 key 自己的 token）。
+/// Base URL 优先级：`usage_script.baseUrl` → 供应商 env 的 base_url。
+pub async fn query_key_usage(
+    state: &AppState,
+    app_type: AppType,
+    provider_id: &str,
+    key_id: &str,
+) -> Result<UsageResult, AppError> {
+    let (script_code, timeout, api_key, base_url, access_token, user_id, template_type) = {
+        let key = state
+            .db
+            .get_provider_key(app_type.as_str(), provider_id, key_id)?
+            .ok_or_else(|| {
+                AppError::localized(
+                    "provider.key.not_found",
+                    format!("Key 不存在: {key_id}"),
+                    format!("Key not found: {key_id}"),
+                )
+            })?;
+
+        let usage_script = key.usage_script.as_ref().ok_or_else(|| {
+            AppError::localized(
+                "provider.usage.script.missing",
+                "未配置用量查询脚本",
+                "Usage script is not configured",
+            )
+        })?;
+        if !usage_script.enabled {
+            return Err(AppError::localized(
+                "provider.usage.disabled",
+                "用量查询未启用",
+                "Usage query is disabled",
+            ));
+        }
+
+        // Base URL 回退到供应商 env 中的 base_url
+        let provider_base_url = {
+            let providers = state.db.get_all_providers(app_type.as_str())?;
+            providers
+                .get(provider_id)
+                .and_then(extract_base_url_from_provider)
+        };
+
+        // 凭证优先级：usage_script.apiKey → 该 key 的 key_value
+        let api_key = usage_script
+            .api_key
+            .clone()
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| key.key_value.clone());
+
+        let base_url = usage_script
+            .base_url
+            .clone()
+            .filter(|u| !u.is_empty())
+            .or(provider_base_url)
+            .unwrap_or_default();
+
+        (
+            usage_script.code.clone(),
+            usage_script.timeout.unwrap_or(10),
+            api_key,
+            base_url,
+            usage_script.access_token.clone(),
+            usage_script.user_id.clone(),
+            usage_script.template_type.clone(),
+        )
+    };
+
+    execute_and_format_usage_result(
+        &script_code,
+        &api_key,
+        &base_url,
+        timeout,
+        access_token.as_deref(),
+        user_id.as_deref(),
+        template_type.as_deref(),
+    )
+    .await
+}
+
+/// Aggregate usage across all usage-enabled keys of a provider (求和后返回单个结果)。
+///
+/// 遍历 `enabled` 且 `usage_script.enabled == true` 的 key，并行查询各自用量，
+/// 累加首套餐的 total/used/remaining（缺失或 < 0 跳过该项）；`unit` 取首个非空；
+/// `planName = "{N} keys 合计"`；部分失败时在 `extra` 标注「x/N 失败」。
+pub async fn aggregate_provider_usage(
+    state: &AppState,
+    app_type: AppType,
+    provider_id: &str,
+) -> Result<UsageResult, AppError> {
+    use futures::future::join_all;
+
+    let keys = state
+        .db
+        .get_enabled_provider_keys(app_type.as_str(), provider_id)?;
+    let usage_keys: Vec<_> = keys
+        .iter()
+        .filter(|k| {
+            k.usage_script
+                .as_ref()
+                .map(|s| s.enabled)
+                .unwrap_or(false)
+        })
+        .collect();
+    let n = usage_keys.len();
+    if n == 0 {
+        return Err(AppError::localized(
+            "provider.usage.no_keys_enabled",
+            "没有启用用量查询的 Key",
+            "No keys have usage query enabled",
+        ));
+    }
+
+    // 并行查询，避免 N 个 key 串行等待（最坏 N × timeout）
+    let results = join_all(usage_keys.iter().map(|key| {
+        let app_type = app_type.clone();
+        let key_id = key.id.clone();
+        async move { query_key_usage(state, app_type, provider_id, &key_id).await }
+    }))
+    .await;
+
+    let mut sum_total = 0.0f64;
+    let mut has_total = false;
+    let mut sum_used = 0.0f64;
+    let mut has_used = false;
+    let mut sum_remaining = 0.0f64;
+    let mut has_remaining = false;
+    let mut unit: Option<String> = None;
+    let mut success_count = 0usize;
+    let mut first_error: Option<String> = None;
+
+    for r in results {
+        match r {
+            Ok(usage) if usage.success => {
+                if let Some(first) = usage.data.as_ref().and_then(|d| d.first()) {
+                    success_count += 1;
+                    if let Some(t) = first.total {
+                        if t >= 0.0 {
+                            sum_total += t;
+                            has_total = true;
+                        }
+                    }
+                    if let Some(u) = first.used {
+                        if u >= 0.0 {
+                            sum_used += u;
+                            has_used = true;
+                        }
+                    }
+                    if let Some(rm) = first.remaining {
+                        if rm >= 0.0 {
+                            sum_remaining += rm;
+                            has_remaining = true;
+                        }
+                    }
+                    if unit.is_none() {
+                        if let Some(un) = first.unit.as_ref().filter(|s| !s.is_empty()) {
+                            unit = Some(un.clone());
+                        }
+                    }
+                } else if first_error.is_none() {
+                    first_error = Some("empty usage data".to_string());
+                }
+            }
+            Ok(usage) => {
+                if first_error.is_none() {
+                    first_error = usage.error.clone();
+                }
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e.to_string());
+                }
+            }
+        }
+    }
+
+    // 全部失败：返回失败态（携带首个错误），让卡片显示失败而非空合计
+    if success_count == 0 {
+        return Ok(UsageResult {
+            success: false,
+            data: None,
+            error: first_error.or_else(|| Some("全部 Key 用量查询失败".to_string())),
+        });
+    }
+
+    let fail_count = n - success_count;
+    let extra = (fail_count > 0).then(|| format!("{fail_count}/{n} 失败"));
+
+    let aggregated = UsageData {
+        plan_name: Some(format!("{n} keys 合计")),
+        extra,
+        is_valid: Some(true),
+        invalid_message: None,
+        total: has_total.then_some(sum_total),
+        used: has_used.then_some(sum_used),
+        remaining: has_remaining.then_some(sum_remaining),
+        unit,
+    };
+
+    Ok(UsageResult {
+        success: true,
+        data: Some(vec![aggregated]),
+        error: None,
+    })
+}
+
 /// Test usage script (using temporary script content, not saved)
 #[allow(clippy::too_many_arguments)]
 pub async fn test_usage_script(

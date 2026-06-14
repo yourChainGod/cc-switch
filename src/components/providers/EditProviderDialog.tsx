@@ -5,7 +5,8 @@ import { Save } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
-import type { Provider, ProviderKey } from "@/types";
+import UsageScriptModal from "@/components/UsageScriptModal";
+import type { Provider, ProviderKey, UsageScript } from "@/types";
 import {
   ProviderForm,
   type ProviderConfigKeyPatch,
@@ -20,6 +21,7 @@ import {
   type ProviderKeyPoolController,
 } from "@/components/providers/keyPool/ProviderKeyPoolDialog";
 import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
+import { usageApi } from "@/lib/api/usage";
 import { isAdditiveApp } from "@/config/additiveApps";
 
 interface EditProviderDialogProps {
@@ -51,6 +53,8 @@ export function EditProviderDialog({
   const [isKeysSaving, setIsKeysSaving] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [isKeyPoolOpen, setIsKeyPoolOpen] = useState(false);
+  // key 级用量配置：当前正在配置用量脚本的 key（null 表示弹窗关闭）
+  const [usageKey, setUsageKey] = useState<ProviderKey | null>(null);
   const [configKeyPatch, setConfigKeyPatch] =
     useState<ProviderConfigKeyPatch | null>(null);
   const configKeyPatchSeqRef = useRef(0);
@@ -741,6 +745,34 @@ export function EditProviderDialog({
     [providerKeys.length, keyIssueCount, effectiveConfigKeyMode, isKeysLoading],
   );
 
+  const handleSaveKeyUsage = useCallback(
+    async (key: ProviderKey, script: UsageScript) => {
+      try {
+        await usageApi.setKeyUsageScript(key.providerId, key.id, appId, script);
+        await loadProviderKeys();
+        // 失效聚合用量（卡片求和）与该 key 的单独用量缓存
+        await queryClient.invalidateQueries({
+          queryKey: ["usage", "aggregated", key.providerId, appId],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["usage", "key", key.providerId, key.id, appId],
+        });
+        toast.success(
+          t("provider.usageSaved", { defaultValue: "用量查询配置已保存" }),
+          { closeButton: true },
+        );
+      } catch (error) {
+        console.error("Failed to save key usage script:", error);
+        toast.error(
+          t("provider.usageSaveFailed", {
+            defaultValue: "用量查询配置保存失败",
+          }),
+        );
+      }
+    },
+    [appId, loadProviderKeys, queryClient, t],
+  );
+
   const keyPoolController = useMemo<ProviderKeyPoolController>(
     () => ({
       keys: providerKeys,
@@ -762,6 +794,7 @@ export function EditProviderDialog({
       resetAllKeys: () => void handleResetAllKeys(),
       setConfigKey: (key) => void handleSetConfigKey(key),
       setConfigKeyAuto: () => void handleSetConfigKeyAuto(),
+      configureKeyUsage: (key) => setUsageKey(key),
     }),
     [
       providerKeys,
@@ -827,6 +860,18 @@ export function EditProviderDialog({
         providerName={activeProvider.name}
         pool={keyPoolController}
       />
+
+      {usageKey && (
+        <UsageScriptModal
+          key={usageKey.id}
+          provider={activeProvider}
+          appId={appId}
+          providerKey={usageKey}
+          isOpen={Boolean(usageKey)}
+          onClose={() => setUsageKey(null)}
+          onSave={(script) => void handleSaveKeyUsage(usageKey, script)}
+        />
+      )}
     </FullScreenPanel>
   );
 }

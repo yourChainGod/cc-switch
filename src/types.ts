@@ -50,6 +50,8 @@ export interface ProviderKey {
   cooldownUntil?: number;
   createdAt: number;
   updatedAt: number;
+  // 该 key 独立的用量查询配置（自定义供应商下沉到 key 级）
+  usageScript?: UsageScript;
 }
 
 export interface ProviderKeySummary {
@@ -61,6 +63,8 @@ export interface ProviderKeySummary {
   cooldown: number;
   disabled: number;
   minPriority?: number | null;
+  // 启用了用量查询的 key 数（> 0 时自定义供应商卡片显示聚合用量）
+  usageEnabled: number;
 }
 
 export interface ProviderKeyInput {
@@ -70,6 +74,7 @@ export interface ProviderKeyInput {
   enabled: boolean;
   priority: number;
   weight: number;
+  usageScript?: UsageScript;
 }
 
 export interface AppConfig {

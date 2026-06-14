@@ -2,7 +2,7 @@ import React from "react";
 import { RefreshCw, AlertCircle, Clock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { type AppId } from "@/lib/api";
-import { useUsageQuery } from "@/lib/query/queries";
+import { useUsageQuery, useAggregatedUsageQuery } from "@/lib/query/queries";
 import { UsageData, Provider } from "@/types";
 import { TierBadge } from "@/components/SubscriptionQuotaFooter";
 import type { QuotaTier } from "@/types/subscription";
@@ -15,6 +15,7 @@ interface UsageFooterProps {
   isCurrent: boolean; // 是否为当前激活的供应商
   isInConfig?: boolean; // OpenCode: 是否已添加到配置
   inline?: boolean; // 是否内联显示（在按钮左侧）
+  aggregated?: boolean; // 自定义供应商：用聚合查询（各 key 用量求和）
 }
 
 /** UsageData → QuotaTier 转换（Token Plan 使用） */
@@ -50,6 +51,7 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
   isCurrent,
   isInConfig = false,
   inline = false,
+  aggregated = false,
 }) => {
   const { t } = useTranslation();
   const isTokenPlan =
@@ -62,15 +64,23 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
     ? provider.meta?.usage_script?.autoQueryInterval || 0
     : 0;
 
+  // 自定义供应商走聚合查询（各 key 求和），其余走供应商级脚本查询。
+  // 两个 hook 都需调用以遵守 hooks 规则，用 enabled 控制实际生效的那个。
+  const scriptQuery = useUsageQuery(providerId, appId, {
+    enabled: usageEnabled && !aggregated,
+    autoQueryInterval: aggregated ? 0 : autoQueryInterval,
+  });
+  const aggregatedQuery = useAggregatedUsageQuery(providerId, appId, {
+    enabled: usageEnabled && aggregated,
+    autoQueryInterval: aggregated ? autoQueryInterval : 0,
+  });
+
   const {
     data: usage,
     isFetching: loading,
     lastQueriedAt,
     refetch,
-  } = useUsageQuery(providerId, appId, {
-    enabled: usageEnabled,
-    autoQueryInterval,
-  });
+  } = aggregated ? aggregatedQuery : scriptQuery;
 
   // 🆕 定期更新当前时间，用于刷新相对时间显示
   const [now, setNow] = React.useState(Date.now());

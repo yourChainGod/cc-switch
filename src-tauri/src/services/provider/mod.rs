@@ -1483,6 +1483,7 @@ impl ProviderService {
                         enabled: true,
                         priority,
                         weight,
+                        usage_script: None,
                     },
                 )?;
             } else if existing.auth_field.as_deref().is_none_or(str::is_empty) {
@@ -1497,6 +1498,7 @@ impl ProviderService {
                         enabled: existing.enabled,
                         priority: existing.priority,
                         weight: existing.weight.max(1),
+                        usage_script: None,
                     },
                 )?;
             }
@@ -1518,6 +1520,7 @@ impl ProviderService {
                     enabled: true,
                     priority: first_priority,
                     weight: 1,
+                    usage_script: None,
                 },
             )?;
             key.id
@@ -2719,6 +2722,25 @@ impl ProviderService {
         provider_id: &str,
     ) -> Result<UsageResult, AppError> {
         usage::query_usage(state, app_type, provider_id).await
+    }
+
+    /// Query a single key's usage (re-export)
+    pub async fn query_key_usage(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+        key_id: &str,
+    ) -> Result<UsageResult, AppError> {
+        usage::query_key_usage(state, app_type, provider_id, key_id).await
+    }
+
+    /// Aggregate usage across a provider's usage-enabled keys (re-export)
+    pub async fn aggregate_provider_usage(
+        state: &AppState,
+        app_type: AppType,
+        provider_id: &str,
+    ) -> Result<UsageResult, AppError> {
+        usage::aggregate_provider_usage(state, app_type, provider_id).await
     }
 
     /// Test usage script (re-export)

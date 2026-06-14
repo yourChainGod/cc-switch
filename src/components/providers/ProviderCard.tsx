@@ -194,6 +194,10 @@ function ProviderCardImpl({
 
   const usageEnabled = provider.meta?.usage_script?.enabled ?? false;
   const isOfficial = isOfficialProvider(provider, appId);
+  // 自定义供应商：用量配置下沉到 key 级，卡片显示各 key 求和的聚合用量；
+  // 是否显示取决于「存在启用用量查询的 key」（来自 keySummary.usageEnabled）。
+  const aggregatedUsageEnabled =
+    !isOfficial && (keySummary?.usageEnabled ?? 0) > 0;
   const supportsOfficialSubscription =
     isOfficial && ["claude", "codex", "gemini"].includes(appId);
   const isOfficialSubscriptionUsage =
@@ -556,7 +560,8 @@ function ProviderCardImpl({
                   provider={provider}
                   providerId={provider.id}
                   appId={appId}
-                  usageEnabled={usageEnabled}
+                  usageEnabled={aggregatedUsageEnabled}
+                  aggregated={true}
                   isCurrent={isCurrent}
                   isInConfig={isInConfig}
                   inline={true}
@@ -628,9 +633,9 @@ function ProviderCardImpl({
                   : undefined
               }
               onConfigureUsage={
-                isOfficial && !supportsOfficialSubscription
-                  ? undefined
-                  : () => onConfigureUsage(provider)
+                supportsOfficialSubscription
+                  ? () => onConfigureUsage(provider)
+                  : undefined
               }
               onDelete={() => onDelete(provider)}
               onRemoveFromConfig={

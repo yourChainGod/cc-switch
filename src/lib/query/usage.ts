@@ -120,6 +120,12 @@ export const usageKeys = {
     [...usageKeys.all, "limits", providerId, appType] as const,
   script: (providerId: string, appType: string) =>
     [...usageKeys.all, providerId, appType] as const,
+  // 自定义供应商聚合用量（各 key 求和）
+  aggregated: (providerId: string, appType: string) =>
+    [...usageKeys.all, "aggregated", providerId, appType] as const,
+  // 单个 key 的用量
+  keyUsage: (providerId: string, keyId: string, appType: string) =>
+    [...usageKeys.all, "key", providerId, keyId, appType] as const,
 };
 
 // Hooks
