@@ -19,10 +19,26 @@ jobs:
           - platform: macos-latest
             args: --target aarch64-apple-darwin
             rust-targets: aarch64-apple-darwin
-          # Windows x64（NSIS 安装包 + MSI）
+          # macOS Intel
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+            rust-targets: x86_64-apple-darwin
+          # Linux x64（.deb + .rpm + AppImage）
+          - platform: ubuntu-22.04
+            args: ""
+            rust-targets: ""
+          # Linux arm64（.deb + .rpm + AppImage）
+          - platform: ubuntu-22.04-arm
+            args: ""
+            rust-targets: ""
+          # Windows x64（NSIS 安装包 .exe）
           - platform: windows-latest
             args: ""
             rust-targets: ""
+          # Windows x86 32 位（NSIS 安装包 .exe）
+          - platform: windows-latest
+            args: --target i686-pc-windows-msvc
+            rust-targets: i686-pc-windows-msvc
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -45,6 +61,17 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Install Linux system deps
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
@@ -53,9 +80,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: "CC Switch v__VERSION__"
-          releaseBody: "macOS (Apple Silicon) 与 Windows (x64) 安装包见 Assets。macOS 包未签名，首次打开需在「系统设置 → 隐私与安全性」中允许。"
+          tagName: ${{ github.ref_name }}
+          releaseName: "CC Switch ${{ github.ref_name }}"
+          releaseBody: "macOS (Apple Silicon / Intel)、Windows (x64 / x86)、Linux (x64 / arm64，.deb / .rpm / AppImage) 安装包见 Assets。macOS 包未签名，首次打开需在「系统设置 → 隐私与安全性」中允许。"
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
