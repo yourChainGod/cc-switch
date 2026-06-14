@@ -17,7 +17,7 @@ interface ConfirmDialogProps {
   confirmText?: string;
   cancelText?: string;
   variant?: "destructive" | "info";
-  zIndex?: "base" | "nested" | "alert" | "top";
+  zIndex?: "base" | "nested" | "alert" | "top" | "panel" | "panel-alert";
   onConfirm: () => void;
   onCancel: () => void;
 }

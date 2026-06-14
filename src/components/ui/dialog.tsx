@@ -13,7 +13,7 @@ const DialogClose = DialogPrimitive.Close;
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay> & {
-    zIndex?: "base" | "nested" | "alert" | "top";
+    zIndex?: "base" | "nested" | "alert" | "top" | "panel" | "panel-alert";
   }
 >(({ className, zIndex = "base", ...props }, ref) => {
   const zIndexMap = {
@@ -21,6 +21,8 @@ const DialogOverlay = React.forwardRef<
     nested: "z-50",
     alert: "z-[60]",
     top: "z-[110]",
+    panel: "z-[120]",
+    "panel-alert": "z-[130]",
   };
 
   return (
@@ -40,7 +42,7 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
-    zIndex?: "base" | "nested" | "alert" | "top";
+    zIndex?: "base" | "nested" | "alert" | "top" | "panel" | "panel-alert";
     variant?: "default" | "fullscreen";
     overlayClassName?: string;
   }
@@ -61,6 +63,8 @@ const DialogContent = React.forwardRef<
       nested: "z-50",
       alert: "z-[60]",
       top: "z-[110]",
+      panel: "z-[120]",
+      "panel-alert": "z-[130]",
     };
 
     const variantClass = {

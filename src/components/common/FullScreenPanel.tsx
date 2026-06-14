@@ -17,6 +17,12 @@ interface FullScreenPanelProps {
   onClose: () => void;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  /**
+   * 覆盖层 z-index 的 Tailwind 类，默认 z-[60]。
+   * 当面板嵌套在更高层级的弹窗（如 Key 池 z-[110]）之上被唤起时，
+   * 需传入更高的类（如 z-[120]），否则会被下层弹窗盖住。
+   */
+  zIndexClassName?: string;
 }
 
 const DRAG_BAR_HEIGHT = isWindows() || isLinux() ? 0 : 28; // px - match App.tsx
@@ -33,6 +39,7 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
   onClose,
   children,
   footer,
+  zIndexClassName = "z-[60]",
 }) => {
   React.useEffect(() => {
     if (isOpen) {
@@ -84,7 +91,7 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
-          className="fixed inset-0 z-[60] flex flex-col"
+          className={`fixed inset-0 ${zIndexClassName} flex flex-col`}
           style={{ backgroundColor: "hsl(var(--background))" }}
         >
           {/* Drag region - match App.tsx. Linux 上 DRAG_BAR_HEIGHT=0，

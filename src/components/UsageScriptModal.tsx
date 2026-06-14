@@ -815,6 +815,8 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
       }
       onClose={onClose}
       footer={footer}
+      // key 级用量配置从 Key 池弹窗（z-[110]）唤起，需抬到其之上
+      zIndexClassName={isKeyLevel ? "z-[120]" : undefined}
     >
       <div className="glass rounded-xl border border-white/10 px-6 py-4 flex items-center justify-between gap-4">
         <p className="text-base font-medium leading-none text-foreground">
@@ -1386,6 +1388,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         title={t("confirm.usage.title")}
         message={t("confirm.usage.message")}
         confirmText={t("confirm.usage.confirm")}
+        zIndex={isKeyLevel ? "panel-alert" : "alert"}
         onConfirm={() => void handleUsageConfirm()}
         onCancel={() => setShowUsageConfirm(false)}
       />
