@@ -17,6 +17,8 @@ pub struct RequestLog {
     pub app_type: String,
     pub model: String,
     pub request_model: String,
+    /// 写入时实际用于计价的模型名；错误行留空。
+    pub pricing_model: String,
     pub usage: TokenUsage,
     pub cost: Option<CostBreakdown>,
     pub latency_ms: u64,
@@ -69,12 +71,12 @@ impl<'a> UsageLogger<'a> {
 
         conn.execute(
             "INSERT OR REPLACE INTO proxy_request_logs (
-                request_id, provider_id, provider_key_id, app_type, model, request_model,
+                request_id, provider_id, provider_key_id, app_type, model, request_model, pricing_model,
                 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                 input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
                 latency_ms, first_token_ms, status_code, error_message, session_id,
                 provider_type, is_streaming, cost_multiplier, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             rusqlite::params![
                 log.request_id,
                 log.provider_id,
@@ -82,6 +84,7 @@ impl<'a> UsageLogger<'a> {
                 log.app_type,
                 log.model,
                 log.request_model,
+                log.pricing_model,
                 log.usage.input_tokens,
                 log.usage.output_tokens,
                 log.usage.cache_read_tokens,
@@ -132,6 +135,7 @@ impl<'a> UsageLogger<'a> {
             app_type,
             model,
             request_model,
+            pricing_model: String::new(),
             usage: TokenUsage::default(),
             cost: None,
             latency_ms,
@@ -173,6 +177,7 @@ impl<'a> UsageLogger<'a> {
             app_type,
             model,
             request_model,
+            pricing_model: String::new(),
             usage: TokenUsage::default(),
             cost: None,
             latency_ms,
@@ -208,13 +213,19 @@ impl<'a> UsageLogger<'a> {
         provider_id: &str,
         app_type: &str,
     ) -> (Decimal, String) {
-        let default_multiplier_raw = match self.db.get_default_cost_multiplier(app_type).await {
-            Ok(value) => value,
-            Err(e) => {
-                log::warn!("[USG-003] 获取默认倍率失败 (app_type={app_type}): {e}");
-                "1".to_string()
-            }
+        let default_app_type = if app_type == "claude-desktop" {
+            "claude"
+        } else {
+            app_type
         };
+        let default_multiplier_raw =
+            match self.db.get_default_cost_multiplier(default_app_type).await {
+                Ok(value) => value,
+                Err(e) => {
+                    log::warn!("[USG-003] 获取默认倍率失败 (app_type={app_type}): {e}");
+                    "1".to_string()
+                }
+            };
         let default_multiplier = match Decimal::from_str(&default_multiplier_raw) {
             Ok(value) => value,
             Err(e) => {
@@ -225,13 +236,14 @@ impl<'a> UsageLogger<'a> {
             }
         };
 
-        let default_pricing_source_raw = match self.db.get_pricing_model_source(app_type).await {
-            Ok(value) => value,
-            Err(e) => {
-                log::warn!("[USG-003] 获取默认计费模式失败 (app_type={app_type}): {e}");
-                PRICING_SOURCE_RESPONSE.to_string()
-            }
-        };
+        let default_pricing_source_raw =
+            match self.db.get_pricing_model_source(default_app_type).await {
+                Ok(value) => value,
+                Err(e) => {
+                    log::warn!("[USG-003] 获取默认计费模式失败 (app_type={app_type}): {e}");
+                    PRICING_SOURCE_RESPONSE.to_string()
+                }
+            };
         let default_pricing_source = if default_pricing_source_raw == PRICING_SOURCE_RESPONSE
             || default_pricing_source_raw == PRICING_SOURCE_REQUEST
         {
@@ -332,6 +344,7 @@ impl<'a> UsageLogger<'a> {
             app_type,
             model,
             request_model,
+            pricing_model,
             usage,
             cost,
             latency_ms,

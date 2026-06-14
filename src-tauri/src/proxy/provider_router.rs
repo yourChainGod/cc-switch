@@ -713,6 +713,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -727,6 +728,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -786,6 +788,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -800,6 +803,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 4,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -857,6 +861,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -912,6 +917,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -929,6 +935,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -983,6 +990,7 @@ mod tests {
                         enabled: true,
                         priority: 10,
                         weight: 1,
+                        usage_script: None,
                     },
                 )
                 .unwrap();
@@ -1035,6 +1043,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1049,6 +1058,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1114,6 +1124,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1128,6 +1139,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1183,6 +1195,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1197,6 +1210,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1241,6 +1255,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1255,6 +1270,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1303,6 +1319,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1317,6 +1334,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1413,6 +1431,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1427,6 +1446,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1633,6 +1653,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -1647,6 +1668,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();

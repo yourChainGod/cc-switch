@@ -6,7 +6,7 @@ import {
   type ProviderConfigKeyPatch,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
-import type { ProviderMeta } from "@/types";
+import type { ProviderCategory, ProviderMeta } from "@/types";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 /**
@@ -18,17 +18,17 @@ import { createTestQueryClient } from "../utils/testQueryClient";
 interface HarnessProps {
   initialMeta: ProviderMeta;
   initialEnv: Record<string, string>;
-  category?: string;
+  category?: ProviderCategory;
 }
+
+type SubmitHandler = (values: ProviderFormValues) => Promise<void>;
 
 function renderClaudeForm({
   initialMeta,
   initialEnv,
   category = "third_party",
 }: HarnessProps) {
-  const onSubmit = vi.fn<[ProviderFormValues], Promise<void>>(() =>
-    Promise.resolve(),
-  );
+  const onSubmit = vi.fn<SubmitHandler>(() => Promise.resolve());
 
   const initialData = {
     name: "Anyrouter",
@@ -77,7 +77,7 @@ function renderClaudeForm({
 }
 
 async function submitAndGetMeta(
-  onSubmit: ReturnType<typeof vi.fn>,
+  onSubmit: ReturnType<typeof renderClaudeForm>["onSubmit"],
 ): Promise<{ meta: ProviderMeta; settingsConfig: Record<string, unknown> }> {
   fireEvent.click(screen.getByRole("button", { name: "submit" }));
   await waitFor(() => expect(onSubmit).toHaveBeenCalled());

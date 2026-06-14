@@ -225,6 +225,46 @@ pub fn anthropic_to_openai_with_reasoning_content(
     Ok(result)
 }
 
+/// 为 OpenAI Chat Completions 流式请求注入 `stream_options.include_usage`。
+pub(crate) fn inject_openai_stream_include_usage(result: &mut Value) {
+    let is_stream = result
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_stream {
+        return;
+    }
+
+    match result.get_mut("stream_options") {
+        Some(Value::Object(opts)) => {
+            opts.insert("include_usage".to_string(), json!(true));
+        }
+        _ => {
+            result["stream_options"] = json!({ "include_usage": true });
+        }
+    }
+}
+
+/// 从上游 `prompt_tokens` 中扣除 cache 部分，得到 Anthropic 语义的纯 `input_tokens`。
+///
+/// OpenAI / Responses 的 `prompt_tokens` 通常**包含** cache 命中与创建的 token，而
+/// Anthropic 的 `input_tokens` 与 `cache_*_tokens` 互斥，需扣除以免同一批 token 被
+/// 同时计入 input 与 cache（成本高估）。但部分第三方中转已返回不含 cache 的
+/// `prompt_tokens`——若 `prompt_tokens` 小于 cache 之和，视为上游已扣减，原样返回，
+/// 避免二次扣减把 input 低估甚至清零。
+pub(crate) fn input_tokens_excluding_cache(
+    prompt_tokens: u64,
+    cached: u64,
+    cache_creation: u64,
+) -> u64 {
+    let cache_total = cached.saturating_add(cache_creation);
+    if prompt_tokens >= cache_total {
+        prompt_tokens - cache_total
+    } else {
+        prompt_tokens
+    }
+}
+
 /// Translate an Anthropic `tool_choice` into the OpenAI Chat Completions form.
 ///
 /// Anthropic forms:
@@ -615,12 +655,26 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
         })
         .or(if has_tool_use { Some("tool_use") } else { None });
 
-    // usage — map cache tokens from OpenAI format to Anthropic format
+    // usage — map cache tokens from OpenAI format to Anthropic format.
     let usage = body.get("usage").cloned().unwrap_or(json!({}));
-    let input_tokens = usage
+    let cached = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(0);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let prompt_tokens = usage
         .get("prompt_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
+    let input_tokens = input_tokens_excluding_cache(prompt_tokens, cached, cache_creation) as u32;
     let output_tokens = usage
         .get("completion_tokens")
         .and_then(|v| v.as_u64())
@@ -631,19 +685,11 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
         "output_tokens": output_tokens
     });
 
-    // OpenAI standard: prompt_tokens_details.cached_tokens
-    if let Some(cached) = usage
-        .pointer("/prompt_tokens_details/cached_tokens")
-        .and_then(|v| v.as_u64())
-    {
+    if cached > 0 {
         usage_json["cache_read_input_tokens"] = json!(cached);
     }
-    // Some compatible servers return these fields directly
-    if let Some(v) = usage.get("cache_read_input_tokens") {
-        usage_json["cache_read_input_tokens"] = v.clone();
-    }
-    if let Some(v) = usage.get("cache_creation_input_tokens") {
-        usage_json["cache_creation_input_tokens"] = v.clone();
+    if cache_creation > 0 {
+        usage_json["cache_creation_input_tokens"] = json!(cache_creation);
     }
 
     let result = json!({
@@ -1287,7 +1333,7 @@ mod tests {
         });
 
         let result = openai_to_anthropic(input).unwrap();
-        assert_eq!(result["usage"]["input_tokens"], 100);
+        assert_eq!(result["usage"]["input_tokens"], 20);
         assert_eq!(result["usage"]["output_tokens"], 50);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 80);
     }
@@ -1311,6 +1357,7 @@ mod tests {
         });
 
         let result = openai_to_anthropic(input).unwrap();
+        assert_eq!(result["usage"]["input_tokens"], 20);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 60);
         assert_eq!(result["usage"]["cache_creation_input_tokens"], 20);
     }

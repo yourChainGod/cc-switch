@@ -120,13 +120,10 @@ fn codex_provider_catalog_model_ids(provider: &Provider) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-/// For Codex Chat providers, ensure the request uses the configured upstream
-/// model before converting the request to Chat Completions.
-pub fn apply_codex_chat_upstream_model(
-    provider: &Provider,
-    body: &mut JsonValue,
-) -> Option<String> {
-    if !codex_provider_uses_chat_completions(provider) {
+/// Ensure Codex requests use the configured upstream model unless the request
+/// selected one of the provider's explicit catalog models.
+pub fn apply_codex_upstream_model(provider: &Provider, body: &mut JsonValue) -> Option<String> {
+    if !body.is_object() {
         return None;
     }
 
@@ -788,7 +785,7 @@ wire_api = "chat"
     }
 
     #[test]
-    fn test_apply_codex_chat_upstream_model_uses_provider_config_model() {
+    fn test_apply_codex_upstream_model_uses_provider_config_model_for_chat_provider() {
         let mut provider = create_provider(json!({
             "config": r#"
 model_provider = "deepseek"
@@ -809,7 +806,7 @@ wire_api = "responses"
             "input": "ping"
         });
 
-        let upstream_model = apply_codex_chat_upstream_model(&provider, &mut body);
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
 
         assert_eq!(upstream_model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(
@@ -819,7 +816,35 @@ wire_api = "responses"
     }
 
     #[test]
-    fn test_apply_codex_chat_upstream_model_preserves_catalog_model_selection() {
+    fn test_apply_codex_upstream_model_for_responses_provider_uses_provider_config_model() {
+        let mut provider = create_provider(json!({
+            "config": r#"
+model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "AnyRouter"
+base_url = "https://a-ocnfniawgw.cn-shanghai.fcapp.run/v1"
+wire_api = "responses"
+"#
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({
+            "model": "gpt-5.4-mini",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn test_apply_codex_upstream_model_preserves_catalog_model_selection_for_chat_provider() {
         let mut provider = create_provider(json!({
             "config": r#"
 model_provider = "deepseek"
@@ -846,7 +871,41 @@ wire_api = "responses"
             "input": "ping"
         });
 
-        let upstream_model = apply_codex_chat_upstream_model(&provider, &mut body);
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("kimi-k2"));
+        assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("kimi-k2"));
+    }
+
+    #[test]
+    fn test_apply_codex_upstream_model_preserves_catalog_model_selection_for_responses_provider() {
+        let mut provider = create_provider(json!({
+            "config": r#"
+model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "AnyRouter"
+base_url = "https://a-ocnfniawgw.cn-shanghai.fcapp.run/v1"
+wire_api = "responses"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5" },
+                    { "model": "kimi-k2" }
+                ]
+            }
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({
+            "model": "kimi-k2",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
 
         assert_eq!(upstream_model.as_deref(), Some("kimi-k2"));
         assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("kimi-k2"));

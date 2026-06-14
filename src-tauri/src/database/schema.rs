@@ -190,6 +190,7 @@ impl Database {
             request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, provider_key_id TEXT,
             app_type TEXT NOT NULL, model TEXT NOT NULL,
             request_model TEXT,
+            pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
@@ -203,6 +204,7 @@ impl Database {
 
         // CREATE TABLE IF NOT EXISTS 不会补齐旧表缺失字段；索引创建前必须先确保列存在。
         Self::add_column_if_missing(conn, "proxy_request_logs", "provider_key_id", "TEXT")?;
+        Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_model", "TEXT")?;
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON proxy_request_logs(provider_id, app_type)", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -467,6 +469,16 @@ impl Database {
                         Self::migrate_v14_to_v15(conn)?;
                         Self::set_user_version(conn, 15)?;
                     }
+                    15 => {
+                        log::info!("迁移数据库从 v15 到 v16（补齐官方供应商订阅用量配置）");
+                        Self::migrate_v15_to_v16(conn)?;
+                        Self::set_user_version(conn, 16)?;
+                    }
+                    16 => {
+                        log::info!("迁移数据库从 v16 到 v17（请求日志记录实际计价模型）");
+                        Self::migrate_v16_to_v17(conn)?;
+                        Self::set_user_version(conn, 17)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -638,6 +650,7 @@ impl Database {
             request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, provider_key_id TEXT,
             app_type TEXT NOT NULL, model TEXT NOT NULL,
             request_model TEXT,
+            pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
@@ -650,6 +663,7 @@ impl Database {
 
         // 为已存在的表添加新字段
         Self::add_column_if_missing(conn, "proxy_request_logs", "provider_key_id", "TEXT")?;
+        Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_model", "TEXT")?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_request_logs_provider_key
              ON proxy_request_logs(provider_key_id)",
@@ -1280,8 +1294,25 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
+        Self::backfill_official_subscription_usage_script(conn)?;
+        log::info!("v15 -> v16 迁移完成：官方供应商订阅用量配置已补齐");
+        Ok(())
+    }
+
+    fn migrate_v16_to_v17(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_model", "TEXT")?;
+        }
+        log::info!("v16 -> v17 迁移完成：proxy_request_logs 已添加 pricing_model");
+        Ok(())
+    }
+
     /// 给 provider_keys 增加 usage_script 列（幂等：已存在则跳过）。
     fn add_provider_keys_usage_script_column(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "provider_keys")? {
+            Self::create_provider_keys_table(conn)?;
+        }
         let already_exists = {
             let mut stmt = conn
                 .prepare("PRAGMA table_info(provider_keys)")
@@ -1305,9 +1336,12 @@ impl Database {
     /// 把非官方供应商 meta.usage_script（通用脚本/余额类）下沉到该供应商所有 key，
     /// 并从 provider meta 清除该字段。官方/订阅类（official_subscription / token_plan）原样保留。
     /// key 上的副本清空 apiKey，使查询时回退到各 key 自身的 keyValue。
-    fn migrate_usage_script_from_provider_meta_to_keys(
-        conn: &Connection,
-    ) -> Result<(), AppError> {
+    fn migrate_usage_script_from_provider_meta_to_keys(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "providers")? {
+            return Ok(());
+        }
+        Self::add_column_if_missing(conn, "providers", "category", "TEXT")?;
+
         let mut stmt = conn
             .prepare("SELECT id, app_type, category, meta FROM providers")
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -1395,6 +1429,79 @@ impl Database {
             .map_err(|e| {
                 AppError::Database(format!("清理 provider meta 中 usage_script 失败: {e}"))
             })?;
+        }
+
+        Ok(())
+    }
+
+    /// 为既有官方供应商补齐官方订阅用量配置。
+    ///
+    /// 新建供应商会在前端注入该配置；迁移负责覆盖升级前已存在的官方记录。
+    /// 仅在 meta.usage_script 缺失时写入，绝不覆盖用户已有配置。
+    fn backfill_official_subscription_usage_script(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "providers")? {
+            return Ok(());
+        }
+        Self::add_column_if_missing(conn, "providers", "category", "TEXT")?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, app_type, meta
+                 FROM providers
+                 WHERE app_type IN ('claude', 'codex', 'gemini')
+                   AND category = 'official'",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut updates: Vec<(String, String, String)> = Vec::new();
+        for row in rows {
+            let (provider_id, app_type, meta_str) =
+                row.map_err(|e| AppError::Database(e.to_string()))?;
+            let mut meta = serde_json::from_str::<serde_json::Value>(&meta_str)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            if meta.get("usage_script").is_some() {
+                continue;
+            }
+
+            if !meta.is_object() {
+                meta = serde_json::json!({});
+            }
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert(
+                    "usage_script".to_string(),
+                    serde_json::json!({
+                        "enabled": true,
+                        "language": "javascript",
+                        "code": "",
+                        "timeout": 10,
+                        "templateType": "official_subscription",
+                        "autoQueryInterval": 5,
+                    }),
+                );
+            }
+
+            let meta_json =
+                serde_json::to_string(&meta).map_err(|e| AppError::Database(e.to_string()))?;
+            updates.push((meta_json, provider_id, app_type));
+        }
+        drop(stmt);
+
+        for (meta, provider_id, app_type) in updates {
+            conn.execute(
+                "UPDATE providers SET meta = ?1 WHERE id = ?2 AND app_type = ?3",
+                params![meta, provider_id, app_type],
+            )
+            .map_err(|e| AppError::Database(format!("补齐官方订阅用量配置失败: {e}")))?;
         }
 
         Ok(())

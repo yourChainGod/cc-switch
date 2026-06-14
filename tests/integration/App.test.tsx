@@ -28,7 +28,6 @@ vi.mock("@/components/providers/ProviderList", () => ({
     onSwitch,
     onEdit,
     onDuplicate,
-    onConfigureUsage,
     onOpenWebsite,
     onCreate,
   }: any) => (
@@ -41,9 +40,6 @@ vi.mock("@/components/providers/ProviderList", () => ({
       <button onClick={() => onEdit(providers[currentProviderId])}>edit</button>
       <button onClick={() => onDuplicate(providers[currentProviderId])}>
         duplicate
-      </button>
-      <button onClick={() => onConfigureUsage(providers[currentProviderId])}>
-        usage
       </button>
       <button onClick={() => onOpenWebsite("https://example.com")}>
         open-website
@@ -92,17 +88,6 @@ vi.mock("@/components/providers/EditProviderDialog", () => ({
           confirm-edit
         </button>
         <button onClick={() => onOpenChange(false)}>close-edit</button>
-      </div>
-    ) : null,
-}));
-
-vi.mock("@/components/UsageScriptModal", () => ({
-  default: ({ isOpen, provider, onSave, onClose }: any) =>
-    isOpen ? (
-      <div data-testid="usage-modal">
-        <span data-testid="usage-provider">{provider?.id}</span>
-        <button onClick={() => onSave("script-code")}>save-script</button>
-        <button onClick={() => onClose()}>close-usage</button>
       </div>
     ) : null,
 }));
@@ -173,11 +158,6 @@ describe("App integration with MSW", () => {
         "codex-1",
       ),
     );
-
-    fireEvent.click(screen.getByText("usage"));
-    expect(screen.getByTestId("usage-modal")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("save-script"));
-    fireEvent.click(screen.getByText("close-usage"));
 
     fireEvent.click(screen.getByText("create"));
     expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();

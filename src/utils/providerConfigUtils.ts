@@ -1,6 +1,8 @@
 // 供应商配置处理工具函数
 
 import type { TemplateValueConfig } from "../config/claudeProviderPresets";
+import type { Provider } from "@/types";
+import type { AppId } from "@/lib/api";
 import { deepClone } from "@/utils/deepClone";
 import { normalizeTomlText } from "@/utils/textNormalization";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -1477,3 +1479,44 @@ export const removeCodexTopLevelField = (
   }
   return finalizeTomlText(lines);
 };
+
+// ========== Provider base URL extraction ==========
+
+/**
+ * 从 Provider 的 settingsConfig 中按 app 提取 Base URL。
+ *
+ * 末尾去尾斜杠，与后端 resolver（Provider::resolve_usage_credentials）对齐，
+ * 使 `{{baseUrl}}/path` 不会产生双斜杠。供 UsageScriptModal 凭据提取与
+ * 「添加 Key 时 sub2api 自动探测」共用，避免 per-app 逻辑重复。
+ */
+export function getProviderBaseUrl(
+  provider: Provider,
+  appId: AppId,
+): string | undefined {
+  try {
+    const config = provider.settingsConfig as Record<string, any> | undefined;
+    if (!config) return undefined;
+
+    let baseUrl: string | undefined;
+    if (appId === "claude" || appId === "claude-desktop") {
+      baseUrl = config.env?.ANTHROPIC_BASE_URL;
+    } else if (appId === "codex") {
+      baseUrl = extractCodexBaseUrl(
+        typeof config.config === "string" ? config.config : "",
+      );
+    } else if (appId === "gemini") {
+      baseUrl = config.env?.GOOGLE_GEMINI_BASE_URL;
+    } else if (appId === "hermes") {
+      baseUrl = config.base_url;
+    } else if (appId === "openclaw") {
+      baseUrl = config.baseUrl;
+    } else if (appId === "opencode") {
+      baseUrl = config.options?.baseURL;
+    }
+
+    return typeof baseUrl === "string" ? baseUrl.replace(/\/+$/, "") : baseUrl;
+  } catch (error) {
+    console.error("Failed to extract provider base URL:", error);
+    return undefined;
+  }
+}

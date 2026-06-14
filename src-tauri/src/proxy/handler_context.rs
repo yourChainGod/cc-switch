@@ -51,6 +51,8 @@ pub struct RequestContext {
     pub current_provider_id: String,
     /// 请求中的模型名称
     pub request_model: String,
+    /// 实际发往上游的模型名（模型映射/路由接管后，forward 成功后回填）。
+    pub outbound_model: Option<String>,
     /// 日志标签（如 "Claude"、"Codex"、"Gemini"）
     pub tag: &'static str,
     /// 应用类型字符串（如 "claude"、"codex"、"gemini"）
@@ -174,6 +176,7 @@ impl RequestContext {
             providers,
             current_provider_id,
             request_model,
+            outbound_model: None,
             tag,
             app_type_str,
             app_type,

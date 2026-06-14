@@ -1255,6 +1255,7 @@
   },
   "usage": {
     "title": "利用統計",
+    "sub2apiAutoEnabled": "Sub2API 使用量クエリを自動有効化しました",
     "subtitle": "AI モデルの利用状況とコスト統計を表示",
     "today": "24時間",
     "last7days": "7日間",

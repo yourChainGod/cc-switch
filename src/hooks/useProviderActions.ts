@@ -5,12 +5,17 @@ import { useTranslation } from "react-i18next";
 import { providersApi, settingsApi, openclawApi, type AppId } from "@/lib/api";
 import type {
   Provider,
+  ProviderKey,
   UsageScript,
   OpenClawProviderConfig,
   OpenClawDefaultModel,
 } from "@/types";
 import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
-import { injectCodingPlanUsageScript } from "@/config/codingPlanProviders";
+import {
+  injectCodingPlanUsageScript,
+  injectOfficialSubscriptionUsageScript,
+} from "@/config/codingPlanProviders";
+import { autoConfigureSub2apiUsage } from "@/lib/usage/autoDetectSub2api";
 import {
   useAddProviderMutation,
   useUpdateProviderMutation,
@@ -81,21 +86,50 @@ export function useProviderActions(
     ) => {
       // 多 Key 输入：providerKeys 不属于 Provider 本体，先剥离，创建成功后组成 Key 池
       const { providerKeys, ...providerRest } = provider;
-      const enhanced = injectCodingPlanUsageScript(activeApp, providerRest);
+      const enhanced = injectOfficialSubscriptionUsageScript(
+        activeApp,
+        injectCodingPlanUsageScript(activeApp, providerRest),
+      );
       const created = await addProviderMutation.mutateAsync(enhanced);
 
       // 创建成功后把全部 Key 写入该供应商的 Key 池（首个 Key 已在配置里）
       if (providerKeys && providerKeys.length > 1 && created?.id) {
         try {
+          const seededKeys: ProviderKey[] = [];
           for (const [index, keyValue] of providerKeys.entries()) {
-            await providersApi.addKey(activeApp, created.id, {
+            const key = await providersApi.addKey(activeApp, created.id, {
               name: `Key ${index + 1}`,
               keyValue,
               enabled: true,
               priority: index,
               weight: 1,
             });
+            seededKeys.push(key);
           }
+          // sub2api 自动探测：命中结构则自动启用用量查询。
+          // 创建流程不阻塞、不弹独立 toast——后台并发探测，下次打开 Key 池即可见。
+          void Promise.allSettled(
+            seededKeys.map((key) =>
+              autoConfigureSub2apiUsage(
+                created,
+                key.id,
+                key.keyValue,
+                activeApp,
+              ),
+            ),
+          ).then((detections) => {
+            const autoEnabledCount = detections.filter(
+              (d) => d.status === "fulfilled" && d.value,
+            ).length;
+            if (autoEnabledCount === 0) return;
+
+            void queryClient.invalidateQueries({
+              queryKey: ["providerKeySummaries", activeApp],
+            });
+            void queryClient.invalidateQueries({
+              queryKey: ["usage", "aggregated", created.id, activeApp],
+            });
+          });
           toast.success(
             t("providerKeys.poolSeeded", {
               count: providerKeys.length,
@@ -112,6 +146,43 @@ export function useProviderActions(
             { closeButton: true },
           );
         }
+      } else if (created && created.id && created.category !== "official") {
+        // 单 Key / 内嵌 Key 新建：首个 Key 已写入 config，由后端同步成 Key 池条目，
+        // 不经上面的播种循环。这里拉取同步出的条目做 sub2api 自动探测，与多 Key
+        // 路径保持一致（官方供应商已自动启用订阅用量，无需探测）。
+        const createdId = created.id;
+        void (async () => {
+          try {
+            const seededKeys = await providersApi.getKeys(activeApp, createdId);
+            const detections = await Promise.allSettled(
+              seededKeys
+                .filter((key) => key.enabled && !key.usageScript)
+                .map((key) =>
+                  autoConfigureSub2apiUsage(
+                    created,
+                    key.id,
+                    key.keyValue,
+                    activeApp,
+                  ),
+                ),
+            );
+            const autoEnabledCount = detections.filter(
+              (d) => d.status === "fulfilled" && d.value,
+            ).length;
+            if (autoEnabledCount === 0) return;
+            void queryClient.invalidateQueries({
+              queryKey: ["providerKeySummaries", activeApp],
+            });
+            void queryClient.invalidateQueries({
+              queryKey: ["usage", "aggregated", createdId, activeApp],
+            });
+          } catch (error) {
+            console.error(
+              "Failed to auto-detect sub2api usage for embedded key:",
+              error,
+            );
+          }
+        })();
       }
 
       // OpenClaw: register models to allowlist after adding provider

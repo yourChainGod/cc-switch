@@ -34,6 +34,8 @@ pub struct ForwardResult {
     pub provider: Provider,
     pub key_id: Option<String>,
     pub claude_api_format: Option<String>,
+    /// 实际发往上游的模型名（模型映射/路由接管后的值）。
+    pub outbound_model: Option<String>,
     /// 活跃连接 RAII guard：随响应一起流转到 response_processor / handle_claude_transform，
     /// 最终被 move 进流式 body future（或非流式响应作用域），覆盖整个响应生命周期。
     pub(crate) connection_guard: Option<ActiveConnectionGuard>,
@@ -219,6 +221,7 @@ impl RequestForwarder {
         &self,
         response: ProxyResponse,
         claude_api_format: Option<String>,
+        outbound_model: Option<String>,
         provider: &Provider,
         attempt_key_id: Option<String>,
         key_id: Option<&str>,
@@ -264,6 +267,7 @@ impl RequestForwarder {
             provider: provider.clone(),
             key_id: attempt_key_id,
             claude_api_format,
+            outbound_model,
             connection_guard: None,
         }
     }
@@ -672,7 +676,7 @@ impl RequestForwarder {
                 )
                 .await
             {
-                Ok((response, claude_api_format)) => {
+                Ok((response, claude_api_format, outbound_model)) => {
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(
@@ -726,6 +730,7 @@ impl RequestForwarder {
                         provider: provider.clone(),
                         key_id: attempt.key_id.clone(),
                         claude_api_format,
+                        outbound_model,
                         connection_guard: None,
                     });
                 }
@@ -782,7 +787,7 @@ impl RequestForwarder {
                                 )
                                 .await
                             {
-                                Ok((response, claude_api_format)) => {
+                                Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!(
                                         "[{app_type_str}] [anyrouter] 429 重试成功（共重试 {retry_round} 次）: provider={}",
                                         provider.name
@@ -791,6 +796,7 @@ impl RequestForwarder {
                                         .finalize_same_provider_retry_success(
                                             response,
                                             claude_api_format,
+                                            outbound_model,
                                             provider,
                                             attempt.key_id.clone(),
                                             key_id,
@@ -854,7 +860,7 @@ impl RequestForwarder {
                                 )
                                 .await
                             {
-                                Ok((response, claude_api_format)) => {
+                                Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!(
                                         "[{app_type_str}] [Media] Unsupported-image retry succeeded"
                                     );
@@ -862,6 +868,7 @@ impl RequestForwarder {
                                         .finalize_same_provider_retry_success(
                                             response,
                                             claude_api_format,
+                                            outbound_model,
                                             provider,
                                             attempt.key_id.clone(),
                                             key_id,
@@ -930,12 +937,13 @@ impl RequestForwarder {
                                 )
                                 .await
                             {
-                                Ok((response, claude_api_format)) => {
+                                Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!("[{app_type_str}] [anyrouter] Codex 兼容重试成功");
                                     return Ok(self
                                         .finalize_same_provider_retry_success(
                                             response,
                                             claude_api_format,
+                                            outbound_model,
                                             provider,
                                             attempt.key_id.clone(),
                                             key_id,
@@ -1040,7 +1048,7 @@ impl RequestForwarder {
                                     )
                                     .await
                                 {
-                                    Ok((response, claude_api_format)) => {
+                                    Ok((response, claude_api_format, outbound_model)) => {
                                         log::info!("[{app_type_str}] [RECT-002] 整流重试成功");
                                         self.record_success_result(
                                             &provider.id,
@@ -1097,6 +1105,7 @@ impl RequestForwarder {
                                             provider: provider.clone(),
                                             key_id: attempt.key_id.clone(),
                                             claude_api_format,
+                                            outbound_model,
                                             connection_guard: None,
                                         });
                                     }
@@ -1216,7 +1225,7 @@ impl RequestForwarder {
                                 )
                                 .await
                             {
-                                Ok((response, claude_api_format)) => {
+                                Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!("[{app_type_str}] [RECT-011] budget 整流重试成功");
                                     self.record_success_result(
                                         &provider.id,
@@ -1267,6 +1276,7 @@ impl RequestForwarder {
                                         provider: provider.clone(),
                                         key_id: attempt.key_id.clone(),
                                         claude_api_format,
+                                        outbound_model,
                                         connection_guard: None,
                                     });
                                 }
@@ -1514,6 +1524,9 @@ impl RequestForwarder {
     }
 
     /// 转发单个请求（使用适配器）
+    ///
+    /// 成功时返回 `(response, claude_api_format, outbound_model)`；`outbound_model`
+    /// 是所有模型映射/请求体转换完成后实际发送给上游的模型名。
     #[allow(clippy::too_many_arguments)]
     async fn forward(
         &self,
@@ -1525,7 +1538,7 @@ impl RequestForwarder {
         headers: &axum::http::HeaderMap,
         extensions: &Extensions,
         adapter: &dyn ProviderAdapter,
-    ) -> Result<(ProxyResponse, Option<String>), ProxyError> {
+    ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         // 使用适配器提取 base_url
         let base_url = adapter.extract_base_url(provider)?;
 
@@ -1555,6 +1568,9 @@ impl RequestForwarder {
         let mut mapped_body = normalize_thinking_type(mapped_body);
 
         mapped_body = super::model_mapper::strip_one_m_suffix_for_upstream_from_body(mapped_body);
+        if matches!(app_type, AppType::Codex) {
+            super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        }
 
         let resolved_claude_api_format = if adapter.name() == "Claude" {
             Some(super::providers::get_claude_api_format(provider).to_string())
@@ -1624,6 +1640,12 @@ impl RequestForwarder {
             adapter.build_url(&base_url, &effective_endpoint)
         };
 
+        let mut outbound_model = mapped_body
+            .get("model")
+            .and_then(|m| m.as_str())
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+
         // 转换请求体（如果需要）
         let request_body = if codex_responses_to_chat {
             let mut mapped_body = mapped_body;
@@ -1636,7 +1658,6 @@ impl RequestForwarder {
                     "[Codex] Restored {restored} cached function call(s) for Chat upstream"
                 );
             }
-            super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
             let reasoning_config =
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
             super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
@@ -1666,6 +1687,13 @@ impl RequestForwarder {
         // 过滤私有参数（以 `_` 开头的字段），防止内部信息泄露到上游
         // 默认使用空白名单，过滤所有 _ 前缀字段
         let filtered_body = prepare_upstream_request_body(request_body);
+        if let Some(model) = filtered_body
+            .get("model")
+            .and_then(|m| m.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            outbound_model = Some(model.to_string());
+        }
         log_prompt_cache_trace(
             app_type,
             provider,
@@ -2013,7 +2041,7 @@ impl RequestForwarder {
             let response = self
                 .prepare_success_response_for_failover(response, request_is_streaming)
                 .await?;
-            Ok((response, resolved_claude_api_format))
+            Ok((response, resolved_claude_api_format, outbound_model))
         } else {
             let status_code = status.as_u16();
             let retry_after = parse_retry_after_header(response.headers());
@@ -3448,6 +3476,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -3462,6 +3491,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -3654,6 +3684,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -3668,6 +3699,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -3761,6 +3793,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -3775,6 +3808,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -3909,6 +3943,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -3922,6 +3957,7 @@ mod tests {
                 enabled: true,
                 priority: 20,
                 weight: 1,
+                usage_script: None,
             },
         )
         .unwrap();
@@ -4109,6 +4145,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4123,6 +4160,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4137,6 +4175,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4263,6 +4302,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4277,6 +4317,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4291,6 +4332,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4394,6 +4436,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4408,6 +4451,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4519,6 +4563,7 @@ mod tests {
                 enabled: true,
                 priority: 10,
                 weight: 1,
+                usage_script: None,
             },
         )
         .unwrap();
@@ -4532,6 +4577,7 @@ mod tests {
                 enabled: true,
                 priority: 20,
                 weight: 1,
+                usage_script: None,
             },
         )
         .unwrap();
@@ -4622,6 +4668,7 @@ mod tests {
                     enabled: true,
                     priority: 10,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();
@@ -4636,6 +4683,7 @@ mod tests {
                     enabled: true,
                     priority: 20,
                     weight: 1,
+                    usage_script: None,
                 },
             )
             .unwrap();

@@ -352,6 +352,10 @@ fn schema_create_tables_include_pricing_model_columns() {
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
+
+    let pricing_model = get_column_info(&conn, "proxy_request_logs", "pricing_model");
+    assert_eq!(pricing_model.r#type, "TEXT");
+    assert_eq!(pricing_model.notnull, 0);
 }
 
 #[test]
@@ -401,6 +405,10 @@ fn schema_migration_v4_adds_pricing_model_columns() {
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
+
+    let pricing_model = get_column_info(&conn, "proxy_request_logs", "pricing_model");
+    assert_eq!(pricing_model.r#type, "TEXT");
+    assert_eq!(pricing_model.notnull, 0);
 
     assert_eq!(
         Database::get_user_version(&conn).expect("version after migration"),

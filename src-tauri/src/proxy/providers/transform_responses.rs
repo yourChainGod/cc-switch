@@ -287,6 +287,23 @@ pub(crate) fn build_anthropic_usage_from_responses(usage: Option<&Value>) -> Val
         result["cache_creation_input_tokens"] = v.clone();
     }
 
+    let cached = result
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_creation = result
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if cached > 0 || cache_creation > 0 {
+        result["input_tokens"] =
+            json!(super::transform::input_tokens_excluding_cache(
+                input,
+                cached,
+                cache_creation
+            ));
+    }
+
     result
 }
 
@@ -1088,7 +1105,7 @@ mod tests {
         });
 
         let result = responses_to_anthropic(input).unwrap();
-        assert_eq!(result["usage"]["input_tokens"], 100);
+        assert_eq!(result["usage"]["input_tokens"], 20);
         assert_eq!(result["usage"]["output_tokens"], 50);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 80);
     }
@@ -1112,6 +1129,7 @@ mod tests {
         });
 
         let result = responses_to_anthropic(input).unwrap();
+        assert_eq!(result["usage"]["input_tokens"], 20);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 60);
         assert_eq!(result["usage"]["cache_creation_input_tokens"], 20);
     }
@@ -1293,7 +1311,7 @@ mod tests {
                 "cached_tokens": 80
             }
         })));
-        assert_eq!(result["input_tokens"], json!(100));
+        assert_eq!(result["input_tokens"], json!(20));
         assert_eq!(result["output_tokens"], json!(50));
         assert_eq!(result["cache_read_input_tokens"], json!(80));
     }
@@ -1308,6 +1326,7 @@ mod tests {
             },
             "cache_read_input_tokens": 100
         })));
+        assert_eq!(result["input_tokens"], json!(0));
         assert_eq!(result["cache_read_input_tokens"], json!(100)); // Direct field overrides nested
     }
 

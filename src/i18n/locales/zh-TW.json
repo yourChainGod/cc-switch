@@ -1200,6 +1200,7 @@
   },
   "usage": {
     "title": "使用統計",
+    "sub2apiAutoEnabled": "已自動啟用 sub2api 用量查詢",
     "subtitle": "查看 AI 模型的使用情況和成本統計",
     "today": "24 小時",
     "last7days": "7 天",

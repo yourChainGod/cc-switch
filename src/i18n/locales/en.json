@@ -1289,6 +1289,7 @@
   },
   "usage": {
     "title": "Usage Statistics",
+    "sub2apiAutoEnabled": "Sub2API usage query auto-enabled",
     "subtitle": "View AI model usage and cost statistics",
     "today": "24 Hours",
     "last7days": "7 Days",

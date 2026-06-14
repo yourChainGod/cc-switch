@@ -7,8 +7,8 @@ import { Provider, ProviderKey, UsageScript, UsageData, createUsageScript } from
 import { usageApi, settingsApi, type AppId } from "@/lib/api";
 import { useSettingsQuery } from "@/lib/query";
 import {
-  extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
+  getProviderBaseUrl,
 } from "@/utils/providerConfigUtils";
 import JsonEditor from "./JsonEditor";
 import * as prettier from "prettier/standalone";
@@ -21,7 +21,7 @@ import { Switch } from "@/components/ui/switch";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { cn } from "@/lib/utils";
-import { TEMPLATE_TYPES } from "@/config/constants";
+import { TEMPLATE_TYPES, SUB2API_USAGE_SCRIPT } from "@/config/constants";
 import {
   CODING_PLAN_PROVIDERS,
   detectCodingPlanProvider,
@@ -102,75 +102,7 @@ const generatePresetTemplates = (
   },
 })`,
 
-  [TEMPLATE_TYPES.SUB2API]: `({
-  request: {
-    url: "{{baseUrl}}/v1/usage",
-    method: "GET",
-    headers: {
-      "Authorization": "Bearer {{apiKey}}",
-      "User-Agent": "cc-switch/1.0"
-    }
-  },
-  extractor: function(response) {
-    if (response.error) {
-      return {
-        isValid: false,
-        invalidMessage: response.error.message || response.message || "查询失败"
-      };
-    }
-
-    const planName = response.planName || response.plan_name || response.name || "Sub2API";
-
-    if (response.mode === "quota_limited" && response.quota) {
-      const used = Number(response.quota.used || 0);
-      const total = Number(response.quota.limit || 0);
-      const remaining = Number(response.quota.remaining ?? (total - used));
-
-      return {
-        planName,
-        used,
-        total,
-        remaining,
-        unit: "USD"
-      };
-    }
-
-    if (response.subscription) {
-      const s = response.subscription;
-
-      const total =
-        Number(s.monthly_limit_usd || 0) ||
-        Number(s.weekly_limit_usd || 0) ||
-        Number(s.daily_limit_usd || 0);
-
-      const used =
-        Number(s.monthly_usage_usd || 0) ||
-        Number(s.weekly_usage_usd || 0) ||
-        Number(s.daily_usage_usd || 0);
-
-      return {
-        planName,
-        used,
-        total,
-        remaining: Number(response.remaining ?? (total - used)),
-        unit: "USD"
-      };
-    }
-
-    if (response.remaining != null || response.balance != null) {
-      return {
-        planName,
-        remaining: Number(response.remaining ?? response.balance),
-        unit: "USD"
-      };
-    }
-
-    return {
-      isValid: false,
-      invalidMessage: "返回结构无法识别"
-    };
-  }
-})`,
+  [TEMPLATE_TYPES.SUB2API]: SUB2API_USAGE_SCRIPT,
 
   // Coding Plan 模板不需要脚本，使用专用 Rust 查询
   [TEMPLATE_TYPES.TOKEN_PLAN]: "",
@@ -274,87 +206,50 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
     apiKey: string | undefined;
     baseUrl: string | undefined;
   } => {
-    const trimTrailingSlash = (url: string | undefined) =>
-      typeof url === "string" ? url.replace(/\/+$/, "") : url;
-    const raw = ((): {
-      apiKey: string | undefined;
-      baseUrl: string | undefined;
-    } => {
+    // Base URL 提取与去尾斜杠统一走 getProviderBaseUrl（与添加 Key 自动探测共用）。
+    const baseUrl = getProviderBaseUrl(provider, appId);
+    const apiKey = ((): string | undefined => {
       try {
         const config = provider.settingsConfig;
-        if (!config) return { apiKey: undefined, baseUrl: undefined };
+        if (!config) return undefined;
 
-        // 处理不同应用的配置格式
+        // 处理不同应用的配置格式（apiKey fallback 对齐后端 resolver）
         if (appId === "claude" || appId === "claude-desktop") {
-          // Claude / Claude Desktop: { env: { ANTHROPIC_AUTH_TOKEN | ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL } }
-          // Key fallbacks mirror the backend resolver (Provider::resolve_usage_credentials).
           const env = (config as any).env || {};
-          return {
-            apiKey:
-              env.ANTHROPIC_AUTH_TOKEN ||
-              env.ANTHROPIC_API_KEY ||
-              env.OPENROUTER_API_KEY ||
-              env.GOOGLE_API_KEY,
-            baseUrl: env.ANTHROPIC_BASE_URL,
-          };
+          return (
+            env.ANTHROPIC_AUTH_TOKEN ||
+            env.ANTHROPIC_API_KEY ||
+            env.OPENROUTER_API_KEY ||
+            env.GOOGLE_API_KEY
+          );
         } else if (appId === "codex") {
-          // Codex: { auth: { OPENAI_API_KEY }, config: TOML string with base_url }
           const auth = (config as any).auth || {};
           const configToml = (config as any).config || "";
-          const apiKey =
-            typeof auth.OPENAI_API_KEY === "string" &&
+          return typeof auth.OPENAI_API_KEY === "string" &&
             auth.OPENAI_API_KEY.trim()
-              ? auth.OPENAI_API_KEY
-              : extractCodexExperimentalBearerToken(configToml);
-          return {
-            apiKey,
-            baseUrl: extractCodexBaseUrl(configToml),
-          };
+            ? auth.OPENAI_API_KEY
+            : extractCodexExperimentalBearerToken(configToml);
         } else if (appId === "gemini") {
-          // Gemini: { env: { GEMINI_API_KEY, GOOGLE_GEMINI_BASE_URL } }
-          // Key fallback mirrors the backend resolver (Provider::resolve_usage_credentials).
           const env = (config as any).env || {};
-          return {
-            apiKey: env.GEMINI_API_KEY || env.GOOGLE_API_KEY,
-            baseUrl: env.GOOGLE_GEMINI_BASE_URL,
-          };
+          return env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
         } else if (appId === "hermes") {
-          // Hermes: settingsConfig 顶层扁平（snake_case，对应 config.yaml）
-          return {
-            apiKey: (config as any).api_key,
-            baseUrl: (config as any).base_url,
-          };
+          return (config as any).api_key;
         } else if (appId === "openclaw") {
-          // OpenClaw: settingsConfig 顶层扁平（camelCase，对应 openclaw.json）
-          return {
-            apiKey: (config as any).apiKey,
-            baseUrl: (config as any).baseUrl,
-          };
+          return (config as any).apiKey;
         } else if (appId === "opencode") {
-          // OpenCode (OMO): 凭据嵌在 options.{baseURL, apiKey}（SDK options 对象）
-          const options = (config as any).options || {};
-          return {
-            apiKey: options.apiKey,
-            baseUrl: options.baseURL,
-          };
+          return ((config as any).options || {}).apiKey;
         }
-        return { apiKey: undefined, baseUrl: undefined };
+        return undefined;
       } catch (error) {
         console.error("Failed to extract provider credentials:", error);
-        return { apiKey: undefined, baseUrl: undefined };
+        return undefined;
       }
     })();
-    // Trim the trailing slash to mirror the backend resolver
-    // (Provider::resolve_usage_credentials), so `{{baseUrl}}/path` never
-    // produces a double slash regardless of which path runs the query.
     // key 级模式：apiKey 默认取该 key 的 keyValue（baseUrl 仍取供应商配置）
     if (isKeyLevel && providerKey) {
-      return {
-        apiKey: providerKey.keyValue,
-        baseUrl: trimTrailingSlash(raw.baseUrl),
-      };
+      return { apiKey: providerKey.keyValue, baseUrl };
     }
-    return { apiKey: raw.apiKey, baseUrl: trimTrailingSlash(raw.baseUrl) };
+    return { apiKey, baseUrl };
   };
 
   const providerCredentials = getProviderCredentials();
@@ -420,6 +315,13 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   });
 
   const [testing, setTesting] = useState(false);
+
+  // {{apiKey}}/{{baseUrl}} 实际注入值：脚本显式非空值优先，否则回退供应商凭据。
+  const effectiveScriptCredentials = {
+    apiKey: script.apiKey?.trim() || providerCredentials.apiKey,
+    baseUrl:
+      script.baseUrl?.trim().replace(/\/+$/, "") || providerCredentials.baseUrl,
+  };
 
   // 🔧 失焦时的验证（严格）- 仅确保有效整数
   const validateTimeout = (value: string): number => {
@@ -758,13 +660,11 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
     const preset = PRESET_TEMPLATES[presetName];
     if (preset !== undefined) {
       if (presetName === TEMPLATE_TYPES.CUSTOM) {
-        // 🔧 自定义模式：用户应该在脚本中直接写完整 URL 和凭证，而不是依赖变量替换
-        // 这样可以避免同源检查导致的问题
-        // 如果用户想使用变量，需要手动在配置中设置 baseUrl/apiKey
+        // 自定义模板没有凭证输入框；清空显式覆盖值后，测试与真实查询
+        // 都会回退到供应商配置，和“支持的变量”区域展示一致。
         setScript({
           ...script,
           code: preset,
-          // 清除凭证，用户可选择手动输入或保持空
           apiKey: undefined,
           baseUrl: undefined,
           accessToken: undefined,
@@ -960,9 +860,9 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                       {"{{baseUrl}}"}
                     </code>
                     <span className="text-muted-foreground/50">=</span>
-                    {providerCredentials.baseUrl ? (
+                    {effectiveScriptCredentials.baseUrl ? (
                       <code className="text-foreground/70 break-all font-mono">
-                        {providerCredentials.baseUrl}
+                        {effectiveScriptCredentials.baseUrl}
                       </code>
                     ) : (
                       <span className="text-muted-foreground/50 italic">
@@ -977,11 +877,11 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                       {"{{apiKey}}"}
                     </code>
                     <span className="text-muted-foreground/50">=</span>
-                    {providerCredentials.apiKey ? (
+                    {effectiveScriptCredentials.apiKey ? (
                       <>
                         {showApiKey ? (
                           <code className="text-foreground/70 break-all font-mono">
-                            {providerCredentials.apiKey}
+                            {effectiveScriptCredentials.apiKey}
                           </code>
                         ) : (
                           <code className="text-foreground/70 font-mono">

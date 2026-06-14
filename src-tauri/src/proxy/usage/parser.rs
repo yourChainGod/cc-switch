@@ -37,6 +37,14 @@ impl TokenUsage {
             .map(|mid| format!("{SESSION_REQUEST_ID_PREFIX}{mid}"))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     }
+
+    /// 是否产生了任一计费维度的 token。
+    pub fn has_billable_tokens(&self) -> bool {
+        self.input_tokens > 0
+            || self.output_tokens > 0
+            || self.cache_read_tokens > 0
+            || self.cache_creation_tokens > 0
+    }
 }
 
 /// API 类型
@@ -185,7 +193,7 @@ impl TokenUsage {
             }
         }
 
-        if usage.input_tokens > 0 || usage.output_tokens > 0 {
+        if usage.has_billable_tokens() {
             usage.model = model;
             usage.message_id = message_id;
             Some(usage)

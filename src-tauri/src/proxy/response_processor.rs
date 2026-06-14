@@ -270,14 +270,19 @@ pub async fn handle_non_streaming(
         if let Ok(json_value) = serde_json::from_slice::<Value>(&body_bytes) {
             // 解析使用量
             if let Some(usage) = (parser_config.response_parser)(&json_value) {
-                // 优先使用 usage 中解析出的模型名称，其次使用响应中的 model 字段，最后回退到请求模型
-                let model = if let Some(ref m) = usage.model {
-                    m.clone()
-                } else if let Some(m) = json_value.get("model").and_then(|m| m.as_str()) {
-                    m.to_string()
-                } else {
-                    ctx.request_model.clone()
-                };
+                let model = usage
+                    .model
+                    .clone()
+                    .filter(|m| !m.is_empty())
+                    .or_else(|| {
+                        json_value
+                            .get("model")
+                            .and_then(|m| m.as_str())
+                            .filter(|m| !m.is_empty())
+                            .map(str::to_string)
+                    })
+                    .or_else(|| ctx.outbound_model.clone())
+                    .unwrap_or_else(|| ctx.request_model.clone());
 
                 spawn_log_usage(
                     state,
@@ -292,8 +297,10 @@ pub async fn handle_non_streaming(
                 let model = json_value
                     .get("model")
                     .and_then(|m| m.as_str())
-                    .unwrap_or(&ctx.request_model)
-                    .to_string();
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| ctx.outbound_model.clone())
+                    .unwrap_or_else(|| ctx.request_model.clone());
                 spawn_log_usage(
                     state,
                     ctx,
@@ -318,7 +325,7 @@ pub async fn handle_non_streaming(
                 state,
                 ctx,
                 TokenUsage::default(),
-                &ctx.request_model,
+                ctx.outbound_model.as_deref().unwrap_or(&ctx.request_model),
                 &ctx.request_model,
                 status.as_u16(),
                 false,
@@ -501,7 +508,11 @@ fn create_usage_collector(
     let provider_id = ctx.provider.id.clone();
     let provider_key_id = ctx.provider_key_id.clone();
     let request_model = ctx.request_model.clone();
-    let app_type_str = parser_config.app_type_str;
+    let fallback_model = ctx
+        .outbound_model
+        .clone()
+        .unwrap_or_else(|| ctx.request_model.clone());
+    let app_type_str = ctx.app_type_str;
     let tag = ctx.tag;
     let start_time = ctx.start_time;
     let stream_parser = parser_config.stream_parser;
@@ -513,7 +524,7 @@ fn create_usage_collector(
         parser_config.stream_event_filter,
         move |events, first_token_ms| {
             if let Some(usage) = stream_parser(&events) {
-                let model = model_extractor(&events, &request_model);
+                let model = model_extractor(&events, &fallback_model);
                 let latency_ms = start_time.elapsed().as_millis() as u64;
 
                 let state = state.clone();
@@ -521,6 +532,7 @@ fn create_usage_collector(
                 let provider_key_id = provider_key_id.clone();
                 let session_id = session_id.clone();
                 let request_model = request_model.clone();
+                let outbound_model = fallback_model.clone();
 
                 tokio::spawn(async move {
                     log_usage_internal(
@@ -530,6 +542,7 @@ fn create_usage_collector(
                         app_type_str,
                         &model,
                         &request_model,
+                        &outbound_model,
                         usage,
                         latency_ms,
                         first_token_ms,
@@ -540,13 +553,14 @@ fn create_usage_collector(
                     .await;
                 });
             } else {
-                let model = model_extractor(&events, &request_model);
+                let model = model_extractor(&events, &fallback_model);
                 let latency_ms = start_time.elapsed().as_millis() as u64;
                 let state = state.clone();
                 let provider_id = provider_id.clone();
                 let provider_key_id = provider_key_id.clone();
                 let session_id = session_id.clone();
                 let request_model = request_model.clone();
+                let outbound_model = fallback_model.clone();
 
                 tokio::spawn(async move {
                     log_usage_internal(
@@ -556,6 +570,7 @@ fn create_usage_collector(
                         app_type_str,
                         &model,
                         &request_model,
+                        &outbound_model,
                         TokenUsage::default(),
                         latency_ms,
                         first_token_ms,
@@ -594,6 +609,10 @@ fn spawn_log_usage(
     let app_type_str = ctx.app_type_str.to_string();
     let model = model.to_string();
     let request_model = request_model.to_string();
+    let outbound_model = ctx
+        .outbound_model
+        .clone()
+        .unwrap_or_else(|| ctx.request_model.clone());
     let latency_ms = ctx.latency_ms();
     let session_id = ctx.session_id.clone();
 
@@ -605,6 +624,7 @@ fn spawn_log_usage(
             &app_type_str,
             &model,
             &request_model,
+            &outbound_model,
             usage,
             latency_ms,
             None,
@@ -633,6 +653,7 @@ async fn log_usage_internal(
     app_type: &str,
     model: &str,
     request_model: &str,
+    outbound_model: &str,
     usage: TokenUsage,
     latency_ms: u64,
     first_token_ms: Option<u64>,
@@ -646,7 +667,7 @@ async fn log_usage_internal(
     let (multiplier, pricing_model_source) =
         logger.resolve_pricing_config(provider_id, app_type).await;
     let pricing_model = if pricing_model_source == PRICING_SOURCE_REQUEST {
-        request_model
+        outbound_model
     } else {
         model
     };
@@ -1025,6 +1046,7 @@ mod tests {
             app_type,
             "resp-model",
             "req-model",
+            "req-model",
             usage,
             10,
             None,
@@ -1085,6 +1107,7 @@ mod tests {
             None,
             app_type,
             "resp-model",
+            "req-model",
             "req-model",
             usage,
             10,

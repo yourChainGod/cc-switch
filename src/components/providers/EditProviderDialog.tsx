@@ -22,6 +22,7 @@ import {
 } from "@/components/providers/keyPool/ProviderKeyPoolDialog";
 import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
 import { usageApi } from "@/lib/api/usage";
+import { autoConfigureSub2apiUsage } from "@/lib/usage/autoDetectSub2api";
 import { isAdditiveApp } from "@/config/additiveApps";
 
 interface EditProviderDialogProps {
@@ -481,25 +482,54 @@ export function EditProviderDialog({
 
     setIsKeysSaving(true);
     try {
+      const created: ProviderKey[] = [];
       for (const [index, value] of uniqueValues.entries()) {
-        await providersApi.addKey(appId, activeProvider.id, {
+        const key = await providersApi.addKey(appId, activeProvider.id, {
           name: `Key ${providerKeys.length + index + 1}`,
           keyValue: value,
           enabled: true,
           priority: providerKeys.length + index,
           weight: 1,
         });
+        created.push(key);
       }
       setKeyDraft("");
+      // sub2api 自动探测：命中结构则自动为该 key 启用用量查询。
+      // 须先于 loadProviderKeys 完成，刷新后 key 列表即可显示已启用。
+      const detections = await Promise.allSettled(
+        created.map((key) =>
+          autoConfigureSub2apiUsage(
+            activeProvider,
+            key.id,
+            key.keyValue,
+            appId,
+          ),
+        ),
+      );
+      const autoEnabledCount = detections.filter(
+        (d) => d.status === "fulfilled" && d.value,
+      ).length;
       await refreshActiveProvider();
       await loadProviderKeys();
       await refreshProviderKeySummaries();
+      if (autoEnabledCount > 0) {
+        await queryClient.invalidateQueries({
+          queryKey: ["usage", "aggregated", activeProvider.id, appId],
+        });
+      }
       toast.success(
         t("providerKeys.added", {
           count: uniqueValues.length,
           defaultValue: "Provider keys added",
         }),
       );
+      if (autoEnabledCount > 0) {
+        toast.success(
+          t("usage.sub2apiAutoEnabled", {
+            defaultValue: "已自动启用 sub2api 用量查询",
+          }),
+        );
+      }
     } catch (error) {
       console.error("Failed to add provider keys:", error);
       toast.error(
@@ -516,6 +546,7 @@ export function EditProviderDialog({
     keyDraft,
     loadProviderKeys,
     providerKeys.length,
+    queryClient,
     refreshActiveProvider,
     refreshProviderKeySummaries,
     t,
@@ -526,7 +557,7 @@ export function EditProviderDialog({
 
     setIsKeysSaving(true);
     try {
-      await providersApi.addKey(appId, activeProvider.id, {
+      const key = await providersApi.addKey(appId, activeProvider.id, {
         name: t("providerKeys.importedName", {
           defaultValue: "Imported key",
         }),
@@ -536,14 +567,33 @@ export function EditProviderDialog({
         priority: 0,
         weight: 1,
       });
+      // sub2api 自动探测：命中结构则自动为该 key 启用用量查询（先于 loadProviderKeys）
+      const autoEnabled = await autoConfigureSub2apiUsage(
+        activeProvider,
+        key.id,
+        key.keyValue,
+        appId,
+      );
       await refreshActiveProvider();
       await loadProviderKeys();
       await refreshProviderKeySummaries();
+      if (autoEnabled) {
+        await queryClient.invalidateQueries({
+          queryKey: ["usage", "aggregated", activeProvider.id, appId],
+        });
+      }
       toast.success(
         t("providerKeys.imported", {
           defaultValue: "Embedded key imported",
         }),
       );
+      if (autoEnabled) {
+        toast.success(
+          t("usage.sub2apiAutoEnabled", {
+            defaultValue: "已自动启用 sub2api 用量查询",
+          }),
+        );
+      }
     } catch (error) {
       console.error("Failed to import embedded provider key:", error);
       toast.error(
@@ -559,6 +609,7 @@ export function EditProviderDialog({
     appId,
     embeddedKey,
     loadProviderKeys,
+    queryClient,
     refreshActiveProvider,
     refreshProviderKeySummaries,
     t,
@@ -794,7 +845,13 @@ export function EditProviderDialog({
       resetAllKeys: () => void handleResetAllKeys(),
       setConfigKey: (key) => void handleSetConfigKey(key),
       setConfigKeyAuto: () => void handleSetConfigKeyAuto(),
-      configureKeyUsage: (key) => setUsageKey(key),
+      // key 级用量配置弹窗（FullScreenPanel，portal 到 body）与 key 池
+      // (Radix Dialog，带 focus-trap) 不能同时打开，否则两者抢焦点导致死循环。
+      // 打开用量配置时先关 key 池，关闭时再重开（全屏面板本就盖住 key 池，视觉无损）。
+      configureKeyUsage: (key) => {
+        setIsKeyPoolOpen(false);
+        setUsageKey(key);
+      },
     }),
     [
       providerKeys,
@@ -868,7 +925,10 @@ export function EditProviderDialog({
           appId={appId}
           providerKey={usageKey}
           isOpen={Boolean(usageKey)}
-          onClose={() => setUsageKey(null)}
+          onClose={() => {
+            setUsageKey(null);
+            setIsKeyPoolOpen(true);
+          }}
           onSave={(script) => void handleSaveKeyUsage(usageKey, script)}
         />
       )}

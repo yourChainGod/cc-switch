@@ -46,7 +46,6 @@ interface ProviderCardProps {
   onRemoveFromConfig?: (provider: Provider) => void;
   onDisableOmo?: () => void;
   onDisableOmoSlim?: () => void;
-  onConfigureUsage: (provider: Provider) => void;
   onOpenWebsite: (url: string) => void;
   onDuplicate: (provider: Provider) => void;
   onTest?: (provider: Provider) => void;
@@ -146,7 +145,6 @@ function ProviderCardImpl({
   onRemoveFromConfig,
   onDisableOmo,
   onDisableOmoSlim,
-  onConfigureUsage,
   onOpenWebsite,
   onDuplicate,
   onTest,
@@ -630,11 +628,6 @@ function ProviderCardImpl({
               onTest={
                 onTest && !isOfficial && !isClaudeThirdParty
                   ? () => onTest(provider)
-                  : undefined
-              }
-              onConfigureUsage={
-                supportsOfficialSubscription
-                  ? () => onConfigureUsage(provider)
                   : undefined
               }
               onDelete={() => onDelete(provider)}

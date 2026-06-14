@@ -59,7 +59,6 @@ interface ProviderListProps {
   onDisableOmo?: () => void;
   onDisableOmoSlim?: () => void;
   onDuplicate: (provider: Provider) => void;
-  onConfigureUsage?: (provider: Provider) => void;
   onOpenWebsite: (url: string) => void;
   onOpenTerminal?: (provider: Provider) => void;
   onCreate?: () => void;
@@ -81,7 +80,6 @@ export function ProviderList({
   onDisableOmo,
   onDisableOmoSlim,
   onDuplicate,
-  onConfigureUsage,
   onOpenWebsite,
   onOpenTerminal,
   onCreate,
@@ -450,7 +448,6 @@ export function ProviderList({
                 onDisableOmo={onDisableOmo}
                 onDisableOmoSlim={onDisableOmoSlim}
                 onDuplicate={onDuplicate}
-                onConfigureUsage={onConfigureUsage}
                 onOpenWebsite={onOpenWebsite}
                 onOpenTerminal={onOpenTerminal}
                 onTest={handleTest}
@@ -599,7 +596,6 @@ interface SortableProviderCardProps {
   onDisableOmo?: () => void;
   onDisableOmoSlim?: () => void;
   onDuplicate: (provider: Provider) => void;
-  onConfigureUsage?: (provider: Provider) => void;
   onOpenWebsite: (url: string) => void;
   onOpenTerminal?: (provider: Provider) => void;
   onTest?: (provider: Provider) => void;
@@ -617,9 +613,6 @@ interface SortableProviderCardProps {
   onSetAsDefault?: (provider: Provider) => void;
 }
 
-// 无配置用量回调时的稳定 no-op，避免每次渲染新建闭包击穿 ProviderCard 的 memo
-const noopConfigureUsage = () => undefined;
-
 function SortableProviderCard({
   provider,
   isCurrent,
@@ -634,7 +627,6 @@ function SortableProviderCard({
   onDisableOmo,
   onDisableOmoSlim,
   onDuplicate,
-  onConfigureUsage,
   onOpenWebsite,
   onOpenTerminal,
   onTest,
@@ -697,7 +689,6 @@ function SortableProviderCard({
         onDisableOmo={onDisableOmo}
         onDisableOmoSlim={onDisableOmoSlim}
         onDuplicate={onDuplicate}
-        onConfigureUsage={onConfigureUsage ?? noopConfigureUsage}
         onOpenWebsite={onOpenWebsite}
         onOpenTerminal={onOpenTerminal}
         onTest={onTest}

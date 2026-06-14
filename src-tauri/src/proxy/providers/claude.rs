@@ -360,6 +360,7 @@ pub fn transform_claude_request_for_api_format(
             {
                 result["prompt_cache_key"] = serde_json::json!(key);
             }
+            super::transform::inject_openai_stream_include_usage(&mut result);
             Ok(result)
         }
         "gemini_native" => super::transform_gemini::anthropic_to_gemini_with_shadow(

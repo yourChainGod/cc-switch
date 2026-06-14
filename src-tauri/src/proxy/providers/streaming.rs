@@ -189,15 +189,22 @@ fn truncate_for_log(data: &str, max_chars: usize) -> String {
 }
 
 fn build_anthropic_usage_json(usage: &Usage) -> Value {
+    let cached = extract_cache_read_tokens(usage).unwrap_or(0);
+    let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+    let input_tokens = super::transform::input_tokens_excluding_cache(
+        usage.prompt_tokens as u64,
+        cached as u64,
+        cache_creation as u64,
+    ) as u32;
     let mut usage_json = json!({
-        "input_tokens": usage.prompt_tokens,
+        "input_tokens": input_tokens,
         "output_tokens": usage.completion_tokens
     });
-    if let Some(cached) = extract_cache_read_tokens(usage) {
+    if cached > 0 {
         usage_json["cache_read_input_tokens"] = json!(cached);
     }
-    if let Some(created) = usage.cache_creation_input_tokens {
-        usage_json["cache_creation_input_tokens"] = json!(created);
+    if cache_creation > 0 {
+        usage_json["cache_creation_input_tokens"] = json!(cache_creation);
     }
     usage_json
 }
@@ -339,12 +346,21 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                                 "output_tokens": 0
                                             });
                                             if let Some(u) = &chunk.usage {
-                                                start_usage["input_tokens"] = json!(u.prompt_tokens);
-                                                if let Some(cached) = extract_cache_read_tokens(u) {
+                                                let cached = extract_cache_read_tokens(u).unwrap_or(0);
+                                                let cache_creation =
+                                                    u.cache_creation_input_tokens.unwrap_or(0);
+                                                let input = super::transform::input_tokens_excluding_cache(
+                                                    u.prompt_tokens as u64,
+                                                    cached as u64,
+                                                    cache_creation as u64,
+                                                ) as u32;
+                                                start_usage["input_tokens"] = json!(input);
+                                                if cached > 0 {
                                                     start_usage["cache_read_input_tokens"] = json!(cached);
                                                 }
-                                                if let Some(created) = u.cache_creation_input_tokens {
-                                                    start_usage["cache_creation_input_tokens"] = json!(created);
+                                                if cache_creation > 0 {
+                                                    start_usage["cache_creation_input_tokens"] =
+                                                        json!(cache_creation);
                                                 }
                                             }
 
@@ -1136,7 +1152,7 @@ mod tests {
             message_delta
                 .pointer("/usage/input_tokens")
                 .and_then(|v| v.as_u64()),
-            Some(13312)
+            Some(13212)
         );
         assert_eq!(
             message_delta

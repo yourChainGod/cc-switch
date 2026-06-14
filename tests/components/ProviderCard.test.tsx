@@ -58,7 +58,6 @@ function renderCard(
       onSwitch={vi.fn()}
       onEdit={vi.fn()}
       onDelete={vi.fn()}
-      onConfigureUsage={vi.fn()}
       onOpenWebsite={vi.fn()}
       onDuplicate={vi.fn()}
       isProxyRunning={false}

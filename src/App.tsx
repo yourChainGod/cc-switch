@@ -72,7 +72,6 @@ import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
-import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel from "@/components/prompts/PromptPanel";
 import { SkillsPage } from "@/components/skills/SkillsPage";
@@ -232,7 +231,6 @@ function App() {
   }, [sharedFeatureApp, currentView]);
 
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
-  const [usageProvider, setUsageProvider] = useState<Provider | null>(null);
   const [confirmAction, setConfirmAction] = useState<{
     provider: Provider;
     action: "remove" | "delete";
@@ -241,7 +239,6 @@ function App() {
   const [showEnvBanner, setShowEnvBanner] = useState(false);
 
   const effectiveEditingProvider = useLastValidValue(editingProvider);
-  const effectiveUsageProvider = useLastValidValue(usageProvider);
 
   const toolbarRef = useRef<HTMLDivElement>(null);
   const isToolbarCompact = useAutoCompact(toolbarRef);
@@ -297,7 +294,6 @@ function App() {
     updateProvider,
     switchProvider,
     deleteProvider,
-    saveUsageScript,
     setAsDefaultModel,
   } = useProviderActions(
     activeApp,
@@ -980,7 +976,6 @@ function App() {
                           : undefined
                       }
                       onDuplicate={handleDuplicateProvider}
-                      onConfigureUsage={setUsageProvider}
                       onOpenWebsite={handleOpenWebsite}
                       onOpenTerminal={
                         activeApp === "claude" ? handleOpenTerminal : undefined
@@ -1543,21 +1538,6 @@ function App() {
         appId={activeApp}
         isProxyTakeover={isCurrentAppTakeoverActive}
       />
-
-      {effectiveUsageProvider && (
-        <UsageScriptModal
-          key={effectiveUsageProvider.id}
-          provider={effectiveUsageProvider}
-          appId={activeApp}
-          isOpen={Boolean(usageProvider)}
-          onClose={() => setUsageProvider(null)}
-          onSave={(script) => {
-            if (usageProvider) {
-              void saveUsageScript(usageProvider, script);
-            }
-          }}
-        />
-      )}
 
       <ConfirmDialog
         isOpen={Boolean(confirmAction)}

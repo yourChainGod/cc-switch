@@ -210,6 +210,7 @@ async fn handle_messages_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     ctx.provider_key_id = result.key_id;
     let api_format = result
@@ -316,7 +317,12 @@ async fn handle_claude_transform(
             let state = state.clone();
             let provider_id = ctx.provider.id.clone();
             let provider_key_id = ctx.provider_key_id.clone();
-            let model = ctx.request_model.clone();
+            let request_model = ctx.request_model.clone();
+            let fallback_model = ctx
+                .outbound_model
+                .clone()
+                .unwrap_or_else(|| ctx.request_model.clone());
+            let app_type_str = ctx.app_type_str;
             let status_code = status.as_u16();
             let start_time = ctx.start_time;
             let session_id = ctx.session_id.clone();
@@ -326,11 +332,17 @@ async fn handle_claude_transform(
                 Some(claude_stream_usage_event_filter),
                 move |events, first_token_ms| {
                     if let Some(usage) = TokenUsage::from_claude_stream_events(&events) {
+                        let model = usage
+                            .model
+                            .clone()
+                            .filter(|m| !m.is_empty())
+                            .unwrap_or_else(|| fallback_model.clone());
                         let latency_ms = start_time.elapsed().as_millis() as u64;
                         let state = state.clone();
                         let provider_id = provider_id.clone();
                         let provider_key_id = provider_key_id.clone();
-                        let model = model.clone();
+                        let request_model = request_model.clone();
+                        let outbound_model = fallback_model.clone();
                         let session_id = session_id.clone();
 
                         tokio::spawn(async move {
@@ -338,9 +350,10 @@ async fn handle_claude_transform(
                                 &state,
                                 &provider_id,
                                 provider_key_id,
-                                "claude",
+                                app_type_str,
                                 &model,
-                                &model,
+                                &request_model,
+                                &outbound_model,
                                 usage,
                                 latency_ms,
                                 first_token_ms,
@@ -425,24 +438,32 @@ async fn handle_claude_transform(
         let model = anthropic_response
             .get("model")
             .and_then(|m| m.as_str())
-            .unwrap_or("unknown");
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .or_else(|| ctx.outbound_model.clone())
+            .unwrap_or_else(|| ctx.request_model.clone());
         let latency_ms = ctx.latency_ms();
 
         let request_model = ctx.request_model.clone();
+        let outbound_model = ctx
+            .outbound_model
+            .clone()
+            .unwrap_or_else(|| ctx.request_model.clone());
+        let app_type_str = ctx.app_type_str;
         tokio::spawn({
             let state = state.clone();
             let provider_id = ctx.provider.id.clone();
             let provider_key_id = ctx.provider_key_id.clone();
-            let model = model.to_string();
             let session_id = ctx.session_id.clone();
             async move {
                 log_usage(
                     &state,
                     &provider_id,
                     provider_key_id,
-                    "claude",
+                    app_type_str,
                     &model,
                     &request_model,
+                    &outbound_model,
                     usage,
                     latency_ms,
                     None,
@@ -545,6 +566,7 @@ pub async fn handle_chat_completions(
     };
 
     let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
 
@@ -610,6 +632,7 @@ pub async fn handle_responses(
     };
 
     let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
 
@@ -687,6 +710,7 @@ pub async fn handle_responses_compact(
     };
 
     let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
 
@@ -739,6 +763,11 @@ async fn handle_codex_chat_to_responses_transform(
             let provider_id = ctx.provider.id.clone();
             let provider_key_id = ctx.provider_key_id.clone();
             let request_model = ctx.request_model.clone();
+            let fallback_model = ctx
+                .outbound_model
+                .clone()
+                .unwrap_or_else(|| ctx.request_model.clone());
+            let app_type_str = ctx.app_type_str;
             let start_time = ctx.start_time;
             let session_id = ctx.session_id.clone();
 
@@ -748,13 +777,22 @@ async fn handle_codex_chat_to_responses_transform(
                 move |events, first_token_ms| {
                     let usage =
                         TokenUsage::from_codex_stream_events_auto(&events).unwrap_or_default();
-                    let model = usage.model.clone().unwrap_or_else(|| request_model.clone());
+                    if !usage.has_billable_tokens() {
+                        log::debug!("[Codex] 流式响应 usage 全 0 或缺失，跳过消费记录");
+                        return;
+                    }
+                    let model = usage
+                        .model
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| fallback_model.clone());
                     let latency_ms = start_time.elapsed().as_millis() as u64;
 
                     let state = state.clone();
                     let provider_id = provider_id.clone();
                     let provider_key_id = provider_key_id.clone();
                     let request_model = request_model.clone();
+                    let outbound_model = fallback_model.clone();
                     let session_id = session_id.clone();
 
                     tokio::spawn(async move {
@@ -762,9 +800,10 @@ async fn handle_codex_chat_to_responses_transform(
                             &state,
                             &provider_id,
                             provider_key_id,
-                            "codex",
+                            app_type_str,
                             &model,
                             &request_model,
+                            &outbound_model,
                             usage,
                             latency_ms,
                             first_token_ms,
@@ -829,17 +868,26 @@ async fn handle_codex_chat_to_responses_transform(
         .record_response(&responses_response)
         .await;
 
-    if let Some(usage) = TokenUsage::from_codex_response_auto(&responses_response) {
+    if let Some(usage) = TokenUsage::from_codex_response_auto(&responses_response)
+        .filter(TokenUsage::has_billable_tokens)
+    {
         let model = responses_response
             .get("model")
             .and_then(|m| m.as_str())
-            .unwrap_or(&ctx.request_model);
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .or_else(|| ctx.outbound_model.clone())
+            .unwrap_or_else(|| ctx.request_model.clone());
         let request_model = ctx.request_model.clone();
+        let outbound_model = ctx
+            .outbound_model
+            .clone()
+            .unwrap_or_else(|| ctx.request_model.clone());
+        let app_type_str = ctx.app_type_str;
         tokio::spawn({
             let state = state.clone();
             let provider_id = ctx.provider.id.clone();
             let provider_key_id = ctx.provider_key_id.clone();
-            let model = model.to_string();
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
             async move {
@@ -847,9 +895,10 @@ async fn handle_codex_chat_to_responses_transform(
                     &state,
                     &provider_id,
                     provider_key_id,
-                    "codex",
+                    app_type_str,
                     &model,
                     &request_model,
+                    &outbound_model,
                     usage,
                     latency_ms,
                     None,
@@ -1219,6 +1268,7 @@ pub async fn handle_gemini(
     };
 
     let connection_guard = result.connection_guard.take();
+    ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
 
@@ -1279,6 +1329,7 @@ async fn log_usage(
     app_type: &str,
     model: &str,
     request_model: &str,
+    outbound_model: &str,
     usage: TokenUsage,
     latency_ms: u64,
     first_token_ms: Option<u64>,
@@ -1297,7 +1348,7 @@ async fn log_usage(
     let (multiplier, pricing_model_source) =
         logger.resolve_pricing_config(provider_id, app_type).await;
     let pricing_model = if pricing_model_source == PRICING_SOURCE_REQUEST {
-        request_model
+        outbound_model
     } else {
         model
     };

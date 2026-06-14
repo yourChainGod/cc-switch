@@ -84,3 +84,33 @@ export function injectCodingPlanUsageScript<
     },
   };
 }
+
+/**
+ * 新建官方供应商时（category === "official"），自动把 meta.usage_script
+ * 标记为 official_subscription 并启用，免去用户在卡片上手动配置。
+ *
+ * - 仅 claude / codex / gemini（后端官方订阅额度查询仅支持这三者）
+ * - 仅在 meta.usage_script 完全缺失时注入，不覆盖用户/已有配置
+ * - code 置空：Rust 端走 CLI/OAuth 凭据调用官方 API，不执行 JS 脚本
+ */
+export function injectOfficialSubscriptionUsageScript<
+  T extends {
+    category?: string;
+    meta?: Record<string, any>;
+  },
+>(appId: string, provider: T): T {
+  if (!["claude", "codex", "gemini"].includes(appId)) return provider;
+  if (provider.category !== "official") return provider;
+  if (provider.meta?.usage_script) return provider;
+
+  return {
+    ...provider,
+    meta: {
+      ...(provider.meta ?? {}),
+      usage_script: createUsageScript({
+        enabled: true,
+        templateType: TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION,
+      }),
+    },
+  };
+}
