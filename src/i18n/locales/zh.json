@@ -1450,6 +1450,7 @@
     "templateCustom": "自定义",
     "templateGeneral": "通用模板",
     "templateNewAPI": "NewAPI",
+    "templateSub2api": "Sub2API",
     "templateTokenPlan": "Token Plan",
     "templateBalance": "官方",
     "templateOfficialSubscription": "官方订阅",

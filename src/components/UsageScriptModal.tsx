@@ -102,6 +102,76 @@ const generatePresetTemplates = (
   },
 })`,
 
+  [TEMPLATE_TYPES.SUB2API]: `({
+  request: {
+    url: "{{baseUrl}}/v1/usage",
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer {{apiKey}}",
+      "User-Agent": "cc-switch/1.0"
+    }
+  },
+  extractor: function(response) {
+    if (response.error) {
+      return {
+        isValid: false,
+        invalidMessage: response.error.message || response.message || "查询失败"
+      };
+    }
+
+    const planName = response.planName || response.plan_name || response.name || "Sub2API";
+
+    if (response.mode === "quota_limited" && response.quota) {
+      const used = Number(response.quota.used || 0);
+      const total = Number(response.quota.limit || 0);
+      const remaining = Number(response.quota.remaining ?? (total - used));
+
+      return {
+        planName,
+        used,
+        total,
+        remaining,
+        unit: "USD"
+      };
+    }
+
+    if (response.subscription) {
+      const s = response.subscription;
+
+      const total =
+        Number(s.monthly_limit_usd || 0) ||
+        Number(s.weekly_limit_usd || 0) ||
+        Number(s.daily_limit_usd || 0);
+
+      const used =
+        Number(s.monthly_usage_usd || 0) ||
+        Number(s.weekly_usage_usd || 0) ||
+        Number(s.daily_usage_usd || 0);
+
+      return {
+        planName,
+        used,
+        total,
+        remaining: Number(response.remaining ?? (total - used)),
+        unit: "USD"
+      };
+    }
+
+    if (response.remaining != null || response.balance != null) {
+      return {
+        planName,
+        remaining: Number(response.remaining ?? response.balance),
+        unit: "USD"
+      };
+    }
+
+    return {
+      isValid: false,
+      invalidMessage: "返回结构无法识别"
+    };
+  }
+})`,
+
   // Coding Plan 模板不需要脚本，使用专用 Rust 查询
   [TEMPLATE_TYPES.TOKEN_PLAN]: "",
 
@@ -117,6 +187,7 @@ const TEMPLATE_NAME_KEYS: Record<string, string> = {
   [TEMPLATE_TYPES.CUSTOM]: "usageScript.templateCustom",
   [TEMPLATE_TYPES.GENERAL]: "usageScript.templateGeneral",
   [TEMPLATE_TYPES.NEW_API]: "usageScript.templateNewAPI",
+  [TEMPLATE_TYPES.SUB2API]: "usageScript.templateSub2api",
   [TEMPLATE_TYPES.TOKEN_PLAN]: "usageScript.templateTokenPlan",
   [TEMPLATE_TYPES.BALANCE]: "usageScript.templateBalance",
   [TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION]:
@@ -490,6 +561,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         | "custom"
         | "general"
         | "newapi"
+        | "sub2api"
         | "token_plan"
         | "balance"
         | "official_subscription"
@@ -611,7 +683,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         testBaseUrl,
         script.accessToken,
         script.userId,
-        selectedTemplate as "custom" | "general" | "newapi" | undefined,
+        selectedTemplate as "custom" | "general" | "newapi" | "sub2api" | undefined,
       );
       if (result.success && result.data && result.data.length > 0) {
         const summary = result.data
@@ -698,7 +770,10 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           accessToken: undefined,
           userId: undefined,
         });
-      } else if (presetName === TEMPLATE_TYPES.GENERAL) {
+      } else if (
+        presetName === TEMPLATE_TYPES.GENERAL ||
+        presetName === TEMPLATE_TYPES.SUB2API
+      ) {
         setScript({
           ...script,
           code: preset,
@@ -755,6 +830,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
 
   const shouldShowCredentialsConfig =
     selectedTemplate === TEMPLATE_TYPES.GENERAL ||
+    selectedTemplate === TEMPLATE_TYPES.SUB2API ||
     selectedTemplate === TEMPLATE_TYPES.NEW_API ||
     (selectedTemplate === TEMPLATE_TYPES.TOKEN_PLAN &&
       script.codingPlanProvider === "zenmux");
@@ -1019,7 +1095,8 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">
-                  {selectedTemplate === TEMPLATE_TYPES.GENERAL && (
+                  {(selectedTemplate === TEMPLATE_TYPES.GENERAL ||
+                    selectedTemplate === TEMPLATE_TYPES.SUB2API) && (
                     <>
                       <div className="space-y-2">
                         <Label htmlFor="usage-api-key">

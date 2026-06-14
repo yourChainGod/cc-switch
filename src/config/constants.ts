@@ -3,6 +3,7 @@ export const TEMPLATE_TYPES = {
   CUSTOM: "custom",
   GENERAL: "general",
   NEW_API: "newapi",
+  SUB2API: "sub2api",
   TOKEN_PLAN: "token_plan",
   BALANCE: "balance",
   OFFICIAL_SUBSCRIPTION: "official_subscription",
