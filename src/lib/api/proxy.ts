@@ -7,6 +7,11 @@ import type {
   GlobalProxyConfig,
   AppProxyConfig,
 } from "@/types/proxy";
+import type {
+  ModelRoutingConfig,
+  ModelRoutingRule,
+  ModelRoutingTestResult,
+} from "@/types/modelRouting";
 
 export const proxyApi = {
   // ========== 代理服务器控制 API ==========
@@ -116,5 +121,25 @@ export const proxyApi = {
   // 设置计费模式来源
   async setPricingModelSource(appType: string, value: string): Promise<void> {
     return invoke("set_pricing_model_source", { appType, value });
+  },
+
+  // ========== 路由层模型映射 API ==========
+
+  // 获取模型映射配置
+  async getModelRoutingConfig(): Promise<ModelRoutingConfig> {
+    return invoke("get_model_routing_config");
+  },
+
+  // 保存模型映射配置
+  async setModelRoutingConfig(config: ModelRoutingConfig): Promise<boolean> {
+    return invoke("set_model_routing_config", { config });
+  },
+
+  // 匹配测试（传入未保存的 rules，对 input 求解）
+  async testModelRouting(
+    input: string,
+    rules: ModelRoutingRule[],
+  ): Promise<ModelRoutingTestResult> {
+    return invoke("test_model_routing", { input, rules });
   },
 };

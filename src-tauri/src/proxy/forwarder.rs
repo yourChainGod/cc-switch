@@ -106,6 +106,8 @@ pub struct RequestForwarder {
     rectifier_config: RectifierConfig,
     /// 优化器配置
     optimizer_config: OptimizerConfig,
+    /// 路由层模型映射配置（按客户端区分的 from→to 映射，命中即为最终上游模型）
+    model_routing: super::model_routing::ModelRoutingConfig,
     /// 非流式请求超时（秒）
     non_streaming_timeout: std::time::Duration,
     /// 流式请求响应头等待超时（秒）
@@ -160,7 +162,7 @@ impl RequestForwarder {
         provider_body: &Value,
         error: &ProxyError,
     ) -> bool {
-        adapter_name == "Claude"
+        matches!(adapter_name, "Claude" | "Codex")
             && self.rectifier_config.enabled
             && self.rectifier_config.request_media_fallback
             && !already_retried
@@ -185,6 +187,7 @@ impl RequestForwarder {
         _streaming_idle_timeout: u64,
         rectifier_config: RectifierConfig,
         optimizer_config: OptimizerConfig,
+        model_routing: super::model_routing::ModelRoutingConfig,
         max_retries: u32,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
@@ -203,6 +206,7 @@ impl RequestForwarder {
             session_client_provided,
             rectifier_config,
             optimizer_config,
+            model_routing,
             non_streaming_timeout: std::time::Duration::from_secs(non_streaming_timeout),
             streaming_first_byte_timeout: std::time::Duration::from_secs(
                 streaming_first_byte_timeout,
@@ -1555,6 +1559,8 @@ impl RequestForwarder {
         // 应用模型映射（独立于格式转换）
         // Claude Desktop proxy 模式必须先把 Desktop 可见的 claude-* route
         // 映射成真实上游模型名，并且未知 route 要直接报错，不能使用默认模型兜底。
+        // 路由层模型映射在原始客户端模型上求解（见下方覆盖步骤），故先快照原始模型名。
+        let original_request_model = body.get("model").and_then(|m| m.as_str()).map(str::to_string);
         let mapped_body = if matches!(app_type, AppType::ClaudeDesktop) {
             crate::claude_desktop_config::map_proxy_request_model(body.clone(), provider)
                 .map_err(|e| ProxyError::InvalidRequest(e.to_string()))?
@@ -1570,6 +1576,27 @@ impl RequestForwarder {
         mapped_body = super::model_mapper::strip_one_m_suffix_for_upstream_from_body(mapped_body);
         if matches!(app_type, AppType::Codex) {
             super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+        }
+
+        // 路由层模型映射（最终权威）：按客户端区分、对原始客户端模型求解，命中即用
+        // 目标模型覆盖上面所有逻辑（catalog/env/pin）。未配置任何规则或未命中时不动，
+        // 行为与现状完全一致。claude-desktop 走自身严格映射，不参与本步。
+        if !matches!(app_type, AppType::ClaudeDesktop) {
+            if let Some(original) = original_request_model.as_deref() {
+                let rules =
+                    super::model_routing::rules_for(&self.model_routing, app_type.as_str());
+                if let Some(hit) = super::model_routing::resolve(rules, original) {
+                    log::info!(
+                        "[{}] [ModelRouting] {original} → {} (rule #{})",
+                        app_type.as_str(),
+                        hit.target,
+                        hit.rule_index
+                    );
+                    mapped_body["model"] = serde_json::json!(hit.target);
+                    mapped_body =
+                        super::model_mapper::strip_one_m_suffix_for_upstream_from_body(mapped_body);
+                }
+            }
         }
 
         let resolved_claude_api_format = if adapter.name() == "Claude" {
@@ -1647,7 +1674,7 @@ impl RequestForwarder {
             .map(str::to_string);
 
         // 转换请求体（如果需要）
-        let request_body = if codex_responses_to_chat {
+        let mut request_body = if codex_responses_to_chat {
             let mut mapped_body = mapped_body;
             let restored = self
                 .codex_chat_history
@@ -1683,6 +1710,13 @@ impl RequestForwarder {
         } else {
             mapped_body
         };
+
+        // Codex /responses 路由到纯文本 OpenAI-chat 上游时，responses→chat 转换会把
+        // input_image 变成上游拒绝的 image_url 块。Claude 适配器在转换前已做过预防性
+        // 剥图（见上方），Codex 路径此前漏覆盖，故在转换后对最终请求体补一次。
+        if matches!(app_type, AppType::Codex) {
+            self.apply_media_prevention(&mut request_body, provider);
+        }
 
         // 过滤私有参数（以 `_` 开头的字段），防止内部信息泄露到上游
         // 默认使用空白名单，过滤所有 _ 前缀字段
@@ -3146,6 +3180,7 @@ mod tests {
             session_client_provided: false,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
+            model_routing: crate::proxy::model_routing::ModelRoutingConfig::default(),
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
@@ -5058,6 +5093,18 @@ mod tests {
         })
     }
 
+    fn body_with_codex_input_image(model: &str) -> Value {
+        json!({
+            "model": model,
+            "input": [{
+                "role": "user",
+                "content": [
+                    { "type": "input_image", "image_url": "data:image/png;base64,abc" }
+                ]
+            }]
+        })
+    }
+
     fn image_unsupported_error() -> ProxyError {
         ProxyError::UpstreamError {
             status: 400,
@@ -5144,6 +5191,22 @@ mod tests {
         let fwd = forwarder_with_rectifier(RectifierConfig::default());
         let body = body_with_image("any-model");
         assert!(fwd.media_retry_should_trigger("Claude", false, &body, &image_unsupported_error()));
+    }
+
+    #[test]
+    fn reactive_triggers_for_codex_image_url_deserialize_errors() {
+        let fwd = forwarder_with_rectifier(RectifierConfig::default());
+        let body = body_with_codex_input_image("deepseek-v4-flash");
+        let error = ProxyError::UpstreamError {
+            status: 400,
+            body: Some(
+                r#"{"error":{"message":"Failed to deserialize the JSON body into the target type: messages[11]: unknown variant image_url, expected text"}}"#
+                    .to_string(),
+            ),
+            retry_after: None,
+        };
+
+        assert!(fwd.media_retry_should_trigger("Codex", false, &body, &error));
     }
 
     #[test]

@@ -375,6 +375,89 @@ pub async fn set_rectifier_config(
     Ok(true)
 }
 
+/// 匹配测试结果（test_model_routing 返回）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRoutingTestResult {
+    /// 是否命中规则
+    pub matched: bool,
+    /// 命中规则下标（从 0 计）
+    pub rule_index: Option<usize>,
+    /// 命中规则的匹配方式
+    pub match_type: Option<String>,
+    /// 命中规则的 pattern
+    pub pattern: Option<String>,
+    /// 最终输出模型（命中=目标模型；未命中=原样输入）
+    pub output: String,
+    /// 各规则的正则编译错误（下标 → 错误信息），供前端行内提示
+    pub regex_errors: std::collections::HashMap<usize, String>,
+}
+
+/// 获取路由层模型映射配置
+#[tauri::command]
+pub async fn get_model_routing_config(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::proxy::model_routing::ModelRoutingConfig, String> {
+    state
+        .db
+        .get_model_routing_config()
+        .map_err(|e| e.to_string())
+}
+
+/// 设置路由层模型映射配置
+#[tauri::command]
+pub async fn set_model_routing_config(
+    state: tauri::State<'_, crate::AppState>,
+    config: crate::proxy::model_routing::ModelRoutingConfig,
+) -> Result<bool, String> {
+    state
+        .db
+        .set_model_routing_config(&config)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// 匹配测试：用传入的 rules（反映未保存编辑）对 input 求解，并校验各正则。
+#[tauri::command]
+pub async fn test_model_routing(
+    input: String,
+    rules: Vec<crate::proxy::model_routing::ModelRoutingRule>,
+) -> Result<ModelRoutingTestResult, String> {
+    use crate::proxy::model_routing::{resolve, MatchType};
+
+    // 逐条校验正则编译错误（仅 Regex 类型）
+    let mut regex_errors = std::collections::HashMap::new();
+    for (idx, rule) in rules.iter().enumerate() {
+        if rule.match_type == MatchType::Regex && !rule.pattern.is_empty() {
+            if let Err(e) = regex::Regex::new(&rule.pattern) {
+                regex_errors.insert(idx, e.to_string());
+            }
+        }
+    }
+
+    let hit = resolve(&rules, &input);
+    Ok(match hit {
+        Some(hit) => ModelRoutingTestResult {
+            matched: true,
+            match_type: rules
+                .get(hit.rule_index)
+                .map(|r| r.match_type.as_str().to_string()),
+            pattern: rules.get(hit.rule_index).map(|r| r.pattern.clone()),
+            output: hit.target,
+            rule_index: Some(hit.rule_index),
+            regex_errors,
+        },
+        None => ModelRoutingTestResult {
+            matched: false,
+            rule_index: None,
+            match_type: None,
+            pattern: None,
+            output: input,
+            regex_errors,
+        },
+    })
+}
+
 /// 获取优化器配置
 #[tauri::command]
 pub async fn get_optimizer_config(

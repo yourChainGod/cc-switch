@@ -326,6 +326,14 @@
     "title": "設定",
     "general": "通用",
     "tabGeneral": "通用",
+    "group": {
+      "appearance": "外觀與語言",
+      "skills": "技能",
+      "apps": "應用",
+      "appsAndWindow": "應用與視窗",
+      "advanced": "進階設定",
+      "codexAuth": "Codex 驗證"
+    },
     "tabAdvanced": "進階",
     "tabProxy": "路由",
     "advanced": {
@@ -2292,6 +2300,37 @@
       "proxyRequired": "路由服務未執行：設定可隨時修改，啟動服務後生效",
       "autoSwitch": "自動故障轉移",
       "autoSwitchDescription": "開啟後按佇列順序自動故障轉移；未自訂佇列時按首頁供應商順序"
+    },
+    "modelMapping": {
+      "title": "模型對應",
+      "description": "依用戶端把請求模型以精確/前綴/後綴/關鍵字/正則對應到目標上游模型",
+      "hint": "依用戶端區分的「真正」模型對應：當請求模型命中某條規則時，目標模型即為最終上游模型，覆寫供應商的 catalog / 環境變數對應。未設定任何規則時不影響現有行為。由上而下首條命中生效。",
+      "empty": "尚無對應規則，點擊下方按鈕新增",
+      "addRule": "新增規則",
+      "patternPlaceholder": "如 gpt-5.4-mini",
+      "targetPlaceholder": "如 gpt-5.5",
+      "invalidRegex": "正則表達式無效",
+      "col": {
+        "enabled": "啟用",
+        "matchType": "匹配方式",
+        "pattern": "匹配模式",
+        "target": "目標模型",
+        "actions": "操作"
+      },
+      "matchType": {
+        "exact": "精確",
+        "prefix": "前綴",
+        "suffix": "後綴",
+        "keyword": "關鍵字",
+        "regex": "正則"
+      },
+      "tester": {
+        "title": "匹配測試",
+        "placeholder": "輸入請求模型名，按 Enter 測試",
+        "run": "測試",
+        "matched": "命中第 {{index}} 條（{{matchType}}: {{pattern}}）",
+        "noMatch": "未命中任何規則，按原樣透傳：{{model}}"
+      }
     },
     "failoverQueue": {
       "title": "故障轉移佇列",

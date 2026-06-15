@@ -326,6 +326,14 @@
     "title": "設定",
     "general": "一般",
     "tabGeneral": "一般",
+    "group": {
+      "appearance": "外観と言語",
+      "skills": "スキル",
+      "apps": "アプリ",
+      "appsAndWindow": "アプリとウィンドウ",
+      "advanced": "詳細設定",
+      "codexAuth": "Codex 認証"
+    },
     "tabAdvanced": "詳細",
     "tabProxy": "ルーティング",
     "advanced": {
@@ -2347,6 +2355,37 @@
       "proxyRequired": "ルーターサービスが未起動です。設定はいつでも変更でき、サービス起動後に有効になります",
       "autoSwitch": "自動フェイルオーバー",
       "autoSwitchDescription": "有効にするとキュー順にフェイルオーバーします。キュー未設定時はホーム画面のプロバイダー順を使用します"
+    },
+    "modelMapping": {
+      "title": "モデルマッピング",
+      "description": "クライアントごとに、リクエストモデルを完全一致／前方一致／後方一致／キーワード／正規表現で上流モデルへマッピング",
+      "hint": "クライアント別の「本物の」モデルマッピング：リクエストモデルがルールに一致すると、そのターゲットが最終的な上流モデルとなり、プロバイダーの catalog／環境変数マッピングを上書きします。ルール未設定時は既存の動作に影響しません。上から順に最初に一致したルールが有効になります。",
+      "empty": "マッピングルールがありません。下のボタンで追加してください。",
+      "addRule": "ルールを追加",
+      "patternPlaceholder": "例: gpt-5.4-mini",
+      "targetPlaceholder": "例: gpt-5.5",
+      "invalidRegex": "正規表現が無効です",
+      "col": {
+        "enabled": "有効",
+        "matchType": "一致方式",
+        "pattern": "パターン",
+        "target": "ターゲットモデル",
+        "actions": "操作"
+      },
+      "matchType": {
+        "exact": "完全一致",
+        "prefix": "前方一致",
+        "suffix": "後方一致",
+        "keyword": "キーワード",
+        "regex": "正規表現"
+      },
+      "tester": {
+        "title": "一致テスト",
+        "placeholder": "リクエストモデル名を入力し、Enter でテスト",
+        "run": "テスト",
+        "matched": "ルール #{{index}} に一致（{{matchType}}: {{pattern}}）",
+        "noMatch": "一致するルールなし。そのまま透過：{{model}}"
+      }
     },
     "failoverQueue": {
       "title": "フェイルオーバーキュー",

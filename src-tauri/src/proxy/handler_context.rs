@@ -68,6 +68,8 @@ pub struct RequestContext {
     pub rectifier_config: RectifierConfig,
     /// 优化器配置
     pub optimizer_config: OptimizerConfig,
+    /// 路由层模型映射配置
+    pub model_routing: super::model_routing::ModelRoutingConfig,
 }
 
 impl RequestContext {
@@ -103,6 +105,7 @@ impl RequestContext {
         // 从数据库读取整流器配置
         let rectifier_config = state.db.get_rectifier_config().unwrap_or_default();
         let optimizer_config = state.db.get_optimizer_config().unwrap_or_default();
+        let model_routing = state.db.get_model_routing_config().unwrap_or_default();
 
         let current_provider_id =
             crate::settings::get_current_provider(&app_type).unwrap_or_default();
@@ -184,6 +187,7 @@ impl RequestContext {
             session_client_provided: session_result.client_provided,
             rectifier_config,
             optimizer_config,
+            model_routing,
         })
     }
 
@@ -250,6 +254,7 @@ impl RequestContext {
             idle_timeout,
             self.rectifier_config.clone(),
             self.optimizer_config.clone(),
+            self.model_routing.clone(),
             max_retries,
         )
     }

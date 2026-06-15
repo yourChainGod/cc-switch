@@ -360,6 +360,14 @@
     "title": "Settings",
     "general": "General",
     "tabGeneral": "General",
+    "group": {
+      "appearance": "Appearance & Language",
+      "skills": "Skills",
+      "apps": "Apps",
+      "appsAndWindow": "Apps & Window",
+      "advanced": "Advanced",
+      "codexAuth": "Codex Auth"
+    },
     "tabAdvanced": "Advanced",
     "tabProxy": "Routing",
     "advanced": {
@@ -2381,6 +2389,37 @@
       "proxyRequired": "Router service is not running: settings can be edited anytime and take effect once the service starts",
       "autoSwitch": "Auto Failover",
       "autoSwitchDescription": "When enabled, failover follows the queue order; with no custom queue, the home-page provider order is used"
+    },
+    "modelMapping": {
+      "title": "Model Mapping",
+      "description": "Map request models to upstream models per client via exact / prefix / suffix / keyword / regex",
+      "hint": "A real per-client model mapping: when a request model matches a rule, its target becomes the final upstream model, overriding the provider's catalog / env-var mapping. With no rules configured, existing behavior is unaffected. The first matching rule (top to bottom) wins.",
+      "empty": "No mapping rules yet. Click the button below to add one.",
+      "addRule": "Add Rule",
+      "patternPlaceholder": "e.g. gpt-5.4-mini",
+      "targetPlaceholder": "e.g. gpt-5.5",
+      "invalidRegex": "Invalid regular expression",
+      "col": {
+        "enabled": "Enabled",
+        "matchType": "Match",
+        "pattern": "Pattern",
+        "target": "Target Model",
+        "actions": "Actions"
+      },
+      "matchType": {
+        "exact": "Exact",
+        "prefix": "Prefix",
+        "suffix": "Suffix",
+        "keyword": "Keyword",
+        "regex": "Regex"
+      },
+      "tester": {
+        "title": "Match Test",
+        "placeholder": "Enter a request model name, press Enter to test",
+        "run": "Test",
+        "matched": "Matched rule #{{index}} ({{matchType}}: {{pattern}})",
+        "noMatch": "No rule matched, passed through as-is: {{model}}"
+      }
     },
     "failoverQueue": {
       "title": "Failover Queue",

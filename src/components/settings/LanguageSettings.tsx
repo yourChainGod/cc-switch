@@ -20,7 +20,7 @@ export function LanguageSettings({ value, onChange }: LanguageSettingsProps) {
           {t("settings.languageHint")}
         </p>
       </header>
-      <div className="inline-flex gap-1 rounded-md border border-border-default bg-background p-1">
+      <div className="inline-flex flex-wrap gap-1 rounded-md border border-border-default bg-background p-1">
         <LanguageButton active={value === "zh"} onClick={() => onChange("zh")}>
           {t("settings.languageOptionChinese")}
         </LanguageButton>
@@ -32,9 +32,6 @@ export function LanguageSettings({ value, onChange }: LanguageSettingsProps) {
         </LanguageButton>
         <LanguageButton active={value === "en"} onClick={() => onChange("en")}>
           {t("settings.languageOptionEnglish")}
-        </LanguageButton>
-        <LanguageButton active={value === "ja"} onClick={() => onChange("ja")}>
-          {t("settings.languageOptionJapanese")}
         </LanguageButton>
       </div>
     </section>

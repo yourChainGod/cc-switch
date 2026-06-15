@@ -360,6 +360,14 @@
     "title": "设置",
     "general": "通用",
     "tabGeneral": "通用",
+    "group": {
+      "appearance": "外观与语言",
+      "skills": "技能",
+      "apps": "应用",
+      "appsAndWindow": "应用与窗口",
+      "advanced": "高级设置",
+      "codexAuth": "Codex 鉴权"
+    },
     "tabAdvanced": "高级",
     "tabProxy": "路由",
     "advanced": {
@@ -2381,6 +2389,37 @@
       "proxyRequired": "路由服务未运行：配置可随时修改，启动服务后生效",
       "autoSwitch": "自动故障转移",
       "autoSwitchDescription": "开启后按队列顺序自动故障转移；未自定义队列时按首页供应商顺序"
+    },
+    "modelMapping": {
+      "title": "模型映射",
+      "description": "按客户端把请求模型精确/前缀/后缀/关键词/正则映射到目标上游模型",
+      "hint": "按客户端区分的「真正」模型映射：当请求模型命中某条规则时，目标模型即为最终上游模型，覆盖供应商的 catalog / 环境变量映射。未配置任何规则时不影响现有行为。自上而下首条命中生效。",
+      "empty": "暂无映射规则，点击下方按钮添加",
+      "addRule": "添加规则",
+      "patternPlaceholder": "如 gpt-5.4-mini",
+      "targetPlaceholder": "如 gpt-5.5",
+      "invalidRegex": "正则表达式无效",
+      "col": {
+        "enabled": "启用",
+        "matchType": "匹配方式",
+        "pattern": "匹配模式",
+        "target": "目标模型",
+        "actions": "操作"
+      },
+      "matchType": {
+        "exact": "精确",
+        "prefix": "前缀",
+        "suffix": "后缀",
+        "keyword": "关键词",
+        "regex": "正则"
+      },
+      "tester": {
+        "title": "匹配测试",
+        "placeholder": "输入请求模型名，回车测试",
+        "run": "测试",
+        "matched": "命中第 {{index}} 条（{{matchType}}: {{pattern}}）",
+        "noMatch": "未命中任何规则，按原样透传：{{model}}"
+      }
     },
     "failoverQueue": {
       "title": "故障转移队列",

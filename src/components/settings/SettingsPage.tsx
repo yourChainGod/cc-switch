@@ -213,44 +213,77 @@ export function SettingsPage({
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.3 }}
-                    className="space-y-6"
+                    className="grid grid-cols-1 gap-4 md:grid-cols-2"
                   >
-                    <LanguageSettings
-                      value={settings.language}
-                      onChange={(lang) => handleAutoSave({ language: lang })}
-                    />
-                    <ThemeSettings />
-                    <AppVisibilitySettings
-                      settings={settings}
-                      onChange={handleAutoSave}
-                    />
-                    <SkillStorageLocationSettings
-                      value={settings.skillStorageLocation ?? "cc_switch"}
-                      installedCount={installedSkills?.length ?? 0}
-                      onMigrated={(location) =>
-                        updateSettings({ skillStorageLocation: location })
-                      }
-                    />
-                    <SkillSyncMethodSettings
-                      value={settings.skillSyncMethod ?? "auto"}
-                      onChange={(method) =>
-                        handleAutoSave({ skillSyncMethod: method })
-                      }
-                    />
-                    <CodexAuthSettings
-                      settings={settings}
-                      onChange={handleAutoSave}
-                    />
-                    <WindowSettings
-                      settings={settings}
-                      onChange={handleAutoSave}
-                    />
-                    <TerminalSettings
-                      value={settings.preferredTerminal}
-                      onChange={(terminal) =>
-                        handleAutoSave({ preferredTerminal: terminal })
-                      }
-                    />
+                    {/* 外观与语言 */}
+                    <div className="glass-card rounded-xl p-4 space-y-4">
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t("settings.group.appearance", {
+                          defaultValue: "外观与语言",
+                        })}
+                      </h3>
+                      <LanguageSettings
+                        value={settings.language}
+                        onChange={(lang) => handleAutoSave({ language: lang })}
+                      />
+                      <ThemeSettings />
+                    </div>
+
+                    {/* 技能 */}
+                    <div className="glass-card rounded-xl p-4 space-y-4">
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t("settings.group.skills", { defaultValue: "技能" })}
+                      </h3>
+                      <SkillStorageLocationSettings
+                        value={settings.skillStorageLocation ?? "cc_switch"}
+                        installedCount={installedSkills?.length ?? 0}
+                        onMigrated={(location) =>
+                          updateSettings({ skillStorageLocation: location })
+                        }
+                      />
+                      <SkillSyncMethodSettings
+                        value={settings.skillSyncMethod ?? "auto"}
+                        onChange={(method) =>
+                          handleAutoSave({ skillSyncMethod: method })
+                        }
+                      />
+                    </div>
+
+                    {/* 应用 */}
+                    <div className="glass-card rounded-xl p-4 space-y-4">
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t("settings.group.apps", {
+                          defaultValue: "应用",
+                        })}
+                      </h3>
+                      <AppVisibilitySettings
+                        settings={settings}
+                        onChange={handleAutoSave}
+                      />
+                      <TerminalSettings
+                        value={settings.preferredTerminal}
+                        onChange={(terminal) =>
+                          handleAutoSave({ preferredTerminal: terminal })
+                        }
+                      />
+                    </div>
+
+                    {/* 高级设置 */}
+                    <div className="glass-card rounded-xl p-4 space-y-4">
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {t("settings.group.advanced", {
+                          defaultValue: "高级设置",
+                        })}
+                      </h3>
+                      <WindowSettings
+                        settings={settings}
+                        onChange={handleAutoSave}
+                      />
+                      <CodexAuthSettings
+                        settings={settings}
+                        onChange={handleAutoSave}
+                      />
+                    </div>
                   </motion.div>
                 ) : null}
               </TabsContent>
@@ -305,8 +338,6 @@ export function SettingsPage({
                             codexDir={settings.codexConfigDir}
                             geminiDir={settings.geminiConfigDir}
                             opencodeDir={settings.opencodeConfigDir}
-                            openclawDir={settings.openclawConfigDir}
-                            hermesDir={settings.hermesConfigDir}
                             onDirectoryChange={updateDirectory}
                             onBrowseDirectory={browseDirectory}
                             onResetDirectory={resetDirectory}

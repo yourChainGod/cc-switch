@@ -259,6 +259,31 @@ impl Database {
         self.set_setting("rectifier_config", &json)
     }
 
+    // --- 路由层模型映射配置 ---
+
+    /// 获取路由层模型映射配置
+    ///
+    /// 不存在时返回默认值（三桶皆空 → 不参与转发链，行为与现状一致）。
+    pub fn get_model_routing_config(
+        &self,
+    ) -> Result<crate::proxy::model_routing::ModelRoutingConfig, AppError> {
+        match self.get_setting("model_routing_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析模型映射配置失败: {e}"))),
+            None => Ok(crate::proxy::model_routing::ModelRoutingConfig::default()),
+        }
+    }
+
+    /// 更新路由层模型映射配置
+    pub fn set_model_routing_config(
+        &self,
+        config: &crate::proxy::model_routing::ModelRoutingConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化模型映射配置失败: {e}")))?;
+        self.set_setting("model_routing_config", &json)
+    }
+
     // --- 优化器配置 ---
 
     /// 获取优化器配置
