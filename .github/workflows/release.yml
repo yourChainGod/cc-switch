@@ -90,3 +90,74 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+  # 全平台产物上传完成后跑一次：按 tag 的 fork 后缀重命名产物 + 生成分平台下载表格
+  finalize-release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rename assets with fork suffix + write platform download table
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          FULL="${TAG#v}"            # 3.16.1-fork-2
+          BASE="${FULL%%-fork-*}"    # 3.16.1
+          REPO="${GITHUB_REPOSITORY}"
+
+          # 1) 带 fork 后缀时，把产物名里的干净版本号替换成带后缀的完整版本
+          if [ "$FULL" != "$BASE" ]; then
+            gh api "/repos/$REPO/releases/tags/$TAG" --jq '.assets[] | "\(.id)\t\(.name)"' \
+            | while IFS=$'\t' read -r id name; do
+                case "$name" in
+                  *"$BASE"*)
+                    newname="${name/$BASE/$FULL}"
+                    if [ "$newname" != "$name" ]; then
+                      if gh api -X PATCH "/repos/$REPO/releases/assets/$id" -f name="$newname" >/dev/null; then
+                        echo "renamed: $name -> $newname"
+                      else
+                        echo "WARN rename failed: $name"
+                      fi
+                    fi ;;
+                esac
+              done
+          fi
+
+          # 2) 按平台生成下载表格写进 release 正文
+          mapfile -t ASSETS < <(gh api "/repos/$REPO/releases/tags/$TAG" --jq '.assets[].name')
+          BASEURL="https://github.com/$REPO/releases/download/$TAG"
+          link() {
+            local pat="$1" a
+            for a in "${ASSETS[@]}"; do
+              case "$a" in
+                $pat) printf '[%s](%s/%s)' "$a" "$BASEURL" "$a"; return ;;
+              esac
+            done
+            printf '—'
+          }
+          {
+            echo "## 下载 $TAG"
+            echo
+            echo "> macOS 包未签名，首次打开需在「系统设置 → 隐私与安全性」中允许。"
+            echo
+            echo "### 🍎 macOS"
+            echo "| 架构 | 下载 |"
+            echo "| --- | --- |"
+            echo "| Apple Silicon | $(link '*aarch64.dmg') |"
+            echo "| Intel (x64) | $(link '*_x64.dmg') |"
+            echo
+            echo "### 🐧 Linux"
+            echo "| 架构 | deb | rpm | AppImage |"
+            echo "| --- | --- | --- | --- |"
+            echo "| x64 | $(link '*amd64.deb') | $(link '*x86_64.rpm') | $(link '*amd64.AppImage') |"
+            echo "| arm64 | $(link '*arm64.deb') | $(link '*aarch64.rpm') | $(link '*aarch64.AppImage') |"
+            echo
+            echo "### 🪟 Windows"
+            echo "| 架构 | 安装包 (NSIS) | MSI |"
+            echo "| --- | --- | --- |"
+            echo "| x64 | $(link '*x64-setup.exe') | $(link '*_x64_en-US.msi') |"
+          } > body.md
+          gh release edit "$TAG" -R "$REPO" --notes-file body.md
+          echo "----- release body -----"; cat body.md
