@@ -74,16 +74,6 @@ export const handlers = [
     success(getLiveProviderIds("opencode")),
   ),
 
-  http.post(`${TAURI_ENDPOINT}/get_openclaw_live_provider_ids`, () =>
-    success(getLiveProviderIds("openclaw")),
-  ),
-
-  http.post(`${TAURI_ENDPOINT}/get_openclaw_default_model`, () =>
-    success({ primary: null, fallback: [] }),
-  ),
-
-  http.post(`${TAURI_ENDPOINT}/scan_openclaw_config_health`, () => success([])),
-
   http.post(`${TAURI_ENDPOINT}/switch_provider`, async ({ request }) => {
     const { id, app } = await withJson<{ id: string; app: AppId }>(request);
     const providers = listProviders(app);

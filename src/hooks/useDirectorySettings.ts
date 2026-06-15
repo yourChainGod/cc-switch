@@ -5,14 +5,8 @@ import { homeDir, join } from "@tauri-apps/api/path";
 import { settingsApi, type AppId } from "@/lib/api";
 import type { SettingsFormState } from "./useSettingsForm";
 
-export type DirectoryAppId = Exclude<AppId, "claude-desktop">;
-type AppDirectoryKey =
-  | "claude"
-  | "codex"
-  | "gemini"
-  | "opencode"
-  | "openclaw"
-  | "hermes";
+export type DirectoryAppId = AppId;
+type AppDirectoryKey = "claude" | "codex" | "gemini" | "opencode";
 type DirectoryKey = "appConfig" | AppDirectoryKey;
 
 export interface ResolvedDirectories {
@@ -21,8 +15,6 @@ export interface ResolvedDirectories {
   codex: string;
   gemini: string;
   opencode: string;
-  openclaw: string;
-  hermes: string;
 }
 
 // Single source of truth for per-app directory metadata.
@@ -34,20 +26,16 @@ const APP_DIRECTORY_META: Record<
   codex: { key: "codex", defaultFolder: ".codex" },
   gemini: { key: "gemini", defaultFolder: ".gemini" },
   opencode: { key: "opencode", defaultFolder: ".config/opencode" },
-  openclaw: { key: "openclaw", defaultFolder: ".openclaw" },
-  hermes: { key: "hermes", defaultFolder: ".hermes" },
 };
 
 // 目录 key -> Settings 表单字段的唯一映射表。
 // 所有需要遍历"每个应用的配置目录字段"的逻辑（trim/sanitize、变更检测、重置）
-// 都应基于该表做表驱动，禁止手写字段清单（曾因此漏掉 hermes）。
+// 都应基于该表做表驱动，禁止手写字段清单。
 export const DIRECTORY_KEY_TO_SETTINGS_FIELD = {
   claude: "claudeConfigDir",
   codex: "codexConfigDir",
   gemini: "geminiConfigDir",
   opencode: "opencodeConfigDir",
-  openclaw: "openclawConfigDir",
-  hermes: "hermesConfigDir",
 } as const satisfies Record<AppDirectoryKey, keyof SettingsFormState>;
 
 export type DirectorySettingsField =
@@ -151,8 +139,6 @@ export function useDirectorySettings({
     codex: "",
     gemini: "",
     opencode: "",
-    openclaw: "",
-    hermes: "",
   });
   const [isLoading, setIsLoading] = useState(true);
 
@@ -162,8 +148,6 @@ export function useDirectorySettings({
     codex: "",
     gemini: "",
     opencode: "",
-    openclaw: "",
-    hermes: "",
   });
   const initialAppConfigDirRef = useRef<string | undefined>(undefined);
 
@@ -180,30 +164,22 @@ export function useDirectorySettings({
           codexDir,
           geminiDir,
           opencodeDir,
-          openclawDir,
-          hermesDir,
           defaultAppConfig,
           defaultClaudeDir,
           defaultCodexDir,
           defaultGeminiDir,
           defaultOpencodeDir,
-          defaultOpenclawDir,
-          defaultHermesDir,
         ] = await Promise.all([
           settingsApi.getAppConfigDirOverride(),
           settingsApi.getConfigDir("claude"),
           settingsApi.getConfigDir("codex"),
           settingsApi.getConfigDir("gemini"),
           settingsApi.getConfigDir("opencode"),
-          settingsApi.getConfigDir("openclaw"),
-          settingsApi.getConfigDir("hermes"),
           computeDefaultAppConfigDir(),
           computeDefaultConfigDir("claude"),
           computeDefaultConfigDir("codex"),
           computeDefaultConfigDir("gemini"),
           computeDefaultConfigDir("opencode"),
-          computeDefaultConfigDir("openclaw"),
-          computeDefaultConfigDir("hermes"),
         ]);
 
         if (!active) return;
@@ -216,8 +192,6 @@ export function useDirectorySettings({
           codex: defaultCodexDir ?? "",
           gemini: defaultGeminiDir ?? "",
           opencode: defaultOpencodeDir ?? "",
-          openclaw: defaultOpenclawDir ?? "",
-          hermes: defaultHermesDir ?? "",
         };
 
         setAppConfigDir(normalizedOverride);
@@ -229,8 +203,6 @@ export function useDirectorySettings({
           codex: codexDir || defaultsRef.current.codex,
           gemini: geminiDir || defaultsRef.current.gemini,
           opencode: opencodeDir || defaultsRef.current.opencode,
-          openclaw: openclawDir || defaultsRef.current.openclaw,
-          hermes: hermesDir || defaultsRef.current.hermes,
         });
       } catch (error) {
         console.error(
@@ -370,8 +342,6 @@ export function useDirectorySettings({
         codex: overrides?.codex ?? defaultsRef.current.codex,
         gemini: overrides?.gemini ?? defaultsRef.current.gemini,
         opencode: overrides?.opencode ?? defaultsRef.current.opencode,
-        openclaw: overrides?.openclaw ?? defaultsRef.current.openclaw,
-        hermes: overrides?.hermes ?? defaultsRef.current.hermes,
       });
     },
     [],

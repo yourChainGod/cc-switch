@@ -4,14 +4,14 @@
 //! （读取端用 json5 解析，用户文件可能带注释），因此写入端不能整文件重新
 //! 序列化，否则注释会被销毁、键序被打乱。
 //!
-//! 写入策略（参考 openclaw_config.rs / hermes_config.rs）：
+//! 写入策略：
 //! 1. 进程内写锁覆盖所有读-改-写入口，防止并发写互踩；
 //! 2. 内容实际变化时，写盘前先把原文件备份到配置目录下的 `backups/`；
 //! 3. 用 json-five 的 round-trip AST 只替换被编辑的顶层子树
 //!    （provider/mcp/plugin），其余内容（含注释与键序）字节级原样保留。
 //!
 //! 已知限制：被替换的顶层子树内部的注释会丢失（子树按 serde_json pretty
-//! 重新生成，双引号键、2 空格缩进），与 OpenClaw 的行为一致。
+//! 重新生成，双引号键、2 空格缩进）。
 
 use crate::config::atomic_write;
 use crate::error::AppError;
@@ -36,7 +36,7 @@ const SLIM_OMO_PLUGIN_PREFIXES: [&str; 1] = ["oh-my-opencode-slim"];
 const OPENCODE_DEFAULT_SOURCE: &str = "{\n  \"$schema\": \"https://opencode.ai/config.json\"\n}\n";
 
 /// opencode.json 进程内写锁：所有读-改-写入口必须先持锁
-/// （参考 hermes_config.rs 的 `OnceLock<Mutex<()>>` 模式）。
+/// （`OnceLock<Mutex<()>>` 模式）。
 fn opencode_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -180,7 +180,7 @@ fn write_full_config_locked(config: &Value) -> Result<(), AppError> {
 
 /// 修改前备份当前 opencode.json 内容
 ///
-/// 参考 openclaw_config.rs 的备份模式：时间戳文件名 + 冲突计数后缀 +
+/// 备份模式：时间戳文件名 + 冲突计数后缀 +
 /// 按 settings.backup_retain_count（默认 10）清理最旧的备份。
 fn create_opencode_backup(source: &str) -> Result<PathBuf, AppError> {
     let backup_dir = get_opencode_backup_dir();
@@ -235,8 +235,7 @@ fn cleanup_opencode_backups(dir: &Path) -> Result<(), AppError> {
 }
 
 // ============================================================================
-// Round-trip 文档编辑（保留注释与键序，参考 openclaw_config.rs 的
-// OpenClawConfigDocument；helper 无法跨模块复用，因为 openclaw 侧均为私有项）
+// Round-trip 文档编辑（保留注释与键序）
 // ============================================================================
 
 struct OpenCodeConfigDocument {
@@ -450,7 +449,7 @@ fn remove_root_section_locked(key: &str) -> Result<(), AppError> {
     write_full_config_locked(&config)
 }
 
-// ---- 以下 round-trip AST helper 与 openclaw_config.rs 同源 ----
+// ---- 以下 round-trip AST helper ----
 
 fn ensure_kvp_context(pair: &mut RtJSONKeyValuePair) -> &mut RtKeyValuePairContext {
     pair.context.get_or_insert_with(|| RtKeyValuePairContext {
@@ -543,7 +542,6 @@ fn make_root_pair(key: &str, value: RtJSONValue, closing_ws: String) -> RtJSONKe
 
 fn make_json_key(key: &str) -> RtJSONValue {
     // opencode.json 是严格 JSON/JSONC，新增键一律使用双引号字符串
-    // （不同于 openclaw 的 JSON5 identifier 键）
     RtJSONValue::DoubleQuotedString(key.to_string())
 }
 

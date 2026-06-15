@@ -68,9 +68,7 @@ describe("useDirectorySettings", () => {
       if (app === "claude") return "/remote/claude";
       if (app === "codex") return "/remote/codex";
       if (app === "gemini") return "/remote/gemini";
-      if (app === "opencode") return "/remote/opencode";
-      if (app === "openclaw") return "/remote/openclaw";
-      return "/remote/hermes";
+      return "/remote/opencode";
     });
     selectConfigDirectoryMock.mockReset();
   });
@@ -91,8 +89,6 @@ describe("useDirectorySettings", () => {
       codex: "/remote/codex",
       gemini: "/remote/gemini",
       opencode: "/remote/opencode",
-      openclaw: "/remote/openclaw",
-      hermes: "/remote/hermes",
     });
   });
 
@@ -215,12 +211,12 @@ describe("useDirectorySettings", () => {
     expect(result.current.resolvedDirs.appConfig).toBe("/home/mock/.cc-switch");
   });
 
-  it("updates openclaw directory when browsing succeeds", async () => {
-    selectConfigDirectoryMock.mockResolvedValue("/picked/openclaw");
+  it("updates opencode directory when browsing succeeds", async () => {
+    selectConfigDirectoryMock.mockResolvedValue("/picked/opencode");
 
     const { result } = renderHook(() =>
       useDirectorySettings({
-        settings: createSettings({ openclawConfigDir: undefined }),
+        settings: createSettings({ opencodeConfigDir: undefined }),
         onUpdateSettings,
       }),
     );
@@ -228,14 +224,14 @@ describe("useDirectorySettings", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     await act(async () => {
-      await result.current.browseDirectory("openclaw");
+      await result.current.browseDirectory("opencode");
     });
 
-    expect(selectConfigDirectoryMock).toHaveBeenCalledWith("/remote/openclaw");
+    expect(selectConfigDirectoryMock).toHaveBeenCalledWith("/remote/opencode");
     expect(onUpdateSettings).toHaveBeenCalledWith({
-      openclawConfigDir: "/picked/openclaw",
+      opencodeConfigDir: "/picked/opencode",
     });
-    expect(result.current.resolvedDirs.openclaw).toBe("/picked/openclaw");
+    expect(result.current.resolvedDirs.opencode).toBe("/picked/opencode");
   });
 
   it("resetAllDirectories applies provided resolved values", async () => {
@@ -250,7 +246,6 @@ describe("useDirectorySettings", () => {
         codex: "/server/codex",
         gemini: "/server/gemini",
         opencode: "/server/opencode",
-        openclaw: "/server/openclaw",
       });
     });
 
@@ -258,6 +253,5 @@ describe("useDirectorySettings", () => {
     expect(result.current.resolvedDirs.codex).toBe("/server/codex");
     expect(result.current.resolvedDirs.gemini).toBe("/server/gemini");
     expect(result.current.resolvedDirs.opencode).toBe("/server/opencode");
-    expect(result.current.resolvedDirs.openclaw).toBe("/server/openclaw");
   });
 });

@@ -1,14 +1,13 @@
 import { useState } from "react";
 import {
-  Server,
   Activity,
   Zap,
   Globe,
-  ShieldAlert,
   Shuffle,
   Power,
   TrendingUp,
   Clock,
+  Copy,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -28,7 +27,6 @@ import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import { ToggleRow } from "@/components/ui/toggle-row";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import {
   useProxyTakeoverStatus,
@@ -75,6 +73,12 @@ export function ProxyTabContent({
     if (m > 0) return `${m}m ${s}s`;
     return `${s}s`;
   };
+
+  // 服务地址 URL（IPv6 需方括号）
+  const formatProxyUrl = (address: string, port: number): string =>
+    address.includes(":")
+      ? `http://[${address}]:${port}`
+      : `http://${address}:${port}`;
 
   const handleToggleProxy = async (checked: boolean) => {
     try {
@@ -124,7 +128,7 @@ export function ProxyTabContent({
       transition={{ duration: 0.3 }}
       className="space-y-4"
     >
-      {/* 路由状态条：常驻顶部，一眼看清运行状态并可一键启停 */}
+      {/* 服务区：本地路由服务中枢——状态 / 启停 / 统计 / 服务设置 / 主页快捷开关 */}
       <div className="rounded-xl glass-card p-4">
         <div className="flex items-center gap-3">
           <div
@@ -158,11 +162,29 @@ export function ProxyTabContent({
               </Badge>
             </div>
             {isRunning && status ? (
-              <code className="mt-0.5 block truncate text-xs text-muted-foreground">
-                {status.address.includes(":")
-                  ? `http://[${status.address}]:${status.port}`
-                  : `http://${status.address}:${status.port}`}
-              </code>
+              <div className="mt-0.5 flex items-center gap-1.5">
+                <code className="truncate text-xs text-muted-foreground">
+                  {formatProxyUrl(status.address, status.port)}
+                </code>
+                <button
+                  type="button"
+                  className="flex-shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+                  title={t("common.copy")}
+                  onClick={() => {
+                    navigator.clipboard.writeText(
+                      formatProxyUrl(status.address, status.port),
+                    );
+                    toast.success(
+                      t("proxy.panel.addressCopied", {
+                        defaultValue: "地址已复制",
+                      }),
+                      { closeButton: true },
+                    );
+                  }}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
+              </div>
             ) : (
               <p className="mt-0.5 truncate text-xs text-muted-foreground">
                 {t("proxy.panel.stoppedDescription", {
@@ -203,28 +225,34 @@ export function ProxyTabContent({
             />
           </div>
         )}
-      </div>
 
-      {/* 故障转移总开关（全局）+ 未运行提示 */}
-      <div className="rounded-xl glass-card p-4 space-y-4">
-        <ToggleRow
-          icon={<ShieldAlert className="h-4 w-4 text-orange-500" />}
-          title={t("settings.advanced.proxy.enableFailoverToggle")}
-          description={t(
-            "settings.advanced.proxy.enableFailoverToggleDescription",
-          )}
-          checked={settings?.enableFailoverToggle ?? false}
-          onCheckedChange={handleFailoverToggleChange}
-        />
-        {!isRunning && (
-          <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-            <p className="text-sm text-blue-600 dark:text-blue-400">
-              {t("proxy.failover.proxyRequired", {
-                defaultValue: "路由服务未运行：配置可随时修改，启动服务后生效",
-              })}
-            </p>
+        {/* 服务设置：停止态编辑地址/端口；运行态看当前供应商 + 日志 */}
+        <div className="mt-4 border-t border-border/50 pt-4">
+          <ProxyPanel />
+        </div>
+
+        {/* 主页面快捷开关：仅控制首页是否显示这两个开关 */}
+        <div className="mt-4 border-t border-border/50 pt-4">
+          <p className="mb-2 text-xs font-medium text-muted-foreground">
+            {t("proxy.homepageToggles.title", {
+              defaultValue: "主页面快捷开关",
+            })}
+          </p>
+          <div className="divide-y divide-border/50 overflow-hidden rounded-lg border border-border/60">
+            <SwitchRow
+              title={t("settings.advanced.proxy.enableFeature")}
+              checked={settings?.enableLocalProxy ?? false}
+              onCheckedChange={(checked) =>
+                onAutoSave({ enableLocalProxy: checked })
+              }
+            />
+            <SwitchRow
+              title={t("settings.advanced.proxy.enableFailoverToggle")}
+              checked={settings?.enableFailoverToggle ?? false}
+              onCheckedChange={handleFailoverToggleChange}
+            />
           </div>
-        )}
+        </div>
       </div>
 
       {/* 顶层客户端维度：先选 Claude/Codex/Gemini，其下统一看 接管 / 模型映射 / 故障转移 */}
@@ -237,108 +265,57 @@ export function ProxyTabContent({
           ))}
         </TabsList>
         {CLIENTS.map((client) => (
-          <TabsContent
-            key={client}
-            value={client}
-            className="mt-4 space-y-4"
-          >
-            {/* 接管 */}
-            <section className="rounded-xl glass-card p-4 space-y-3">
-              <SectionHeader
-                icon={<Power className="h-4 w-4 text-green-500" />}
-                title={t("proxyConfig.appTakeover", {
-                  defaultValue: "应用接管",
-                })}
-                description={t("proxy.takeover.hint", {
-                  defaultValue:
-                    "启用后该客户端的请求将通过本地代理转发（需先启动路由服务）",
-                })}
-              />
-              <ClientTakeoverToggle appType={client} />
-            </section>
+          <TabsContent key={client} value={client} className="mt-3">
+            <div className="space-y-4 rounded-xl glass-card p-4">
+              {/* 路由启用（接管） */}
+              <section className="space-y-3">
+                <SectionHeader
+                  icon={<Power className="h-4 w-4 text-green-500" />}
+                  title={t("proxyConfig.appTakeover", {
+                    defaultValue: "应用接管",
+                  })}
+                  description={t("proxy.takeover.hint", {
+                    defaultValue:
+                      "启用后该客户端的请求将通过本地代理转发（需先启动路由服务）",
+                  })}
+                />
+                <ClientTakeoverToggle appType={client} />
+              </section>
 
-            {/* 模型映射 */}
-            <section className="rounded-xl glass-card p-4 space-y-3">
-              <SectionHeader
-                icon={<Shuffle className="h-4 w-4 text-indigo-500" />}
-                title={t("proxy.modelMapping.title", {
-                  defaultValue: "模型映射",
-                })}
-                description={t("proxy.modelMapping.description", {
-                  defaultValue:
-                    "按客户端把请求模型精确/前缀/后缀/关键词/正则映射到目标上游模型",
-                })}
-              />
-              <ModelMappingPanel client={client} />
-            </section>
+              {/* 模型映射 */}
+              <section className="space-y-3 border-t border-border/50 pt-4">
+                <SectionHeader
+                  icon={<Shuffle className="h-4 w-4 text-indigo-500" />}
+                  title={t("proxy.modelMapping.title", {
+                    defaultValue: "模型映射",
+                  })}
+                  description={t("proxy.modelMapping.description", {
+                    defaultValue:
+                      "按客户端把请求模型精确/前缀/后缀/关键词/正则映射到目标上游模型",
+                  })}
+                />
+                <ModelMappingPanel client={client} />
+              </section>
 
-            {/* 故障转移 */}
-            <section className="rounded-xl glass-card p-4 space-y-4">
-              <SectionHeader
-                icon={<Activity className="h-4 w-4 text-orange-500" />}
-                title={t("settings.advanced.failover.title")}
-                description={t("settings.advanced.failover.description")}
-              />
-              <div className="space-y-1">
-                <h4 className="text-sm font-semibold">
-                  {t("proxy.failoverQueue.title")}
-                </h4>
-                <p className="text-xs text-muted-foreground">
-                  {t("proxy.failoverQueue.description")}
-                </p>
-              </div>
-              <FailoverQueueManager appType={client} />
-              <div className="border-t border-border/50 pt-4">
-                <AutoFailoverConfigPanel appType={client} />
-              </div>
-            </section>
+              {/* 故障转移 */}
+              <section className="space-y-4 border-t border-border/50 pt-4">
+                <SectionHeader
+                  icon={<Activity className="h-4 w-4 text-orange-500" />}
+                  title={t("settings.advanced.failover.title")}
+                  description={t("settings.advanced.failover.description")}
+                />
+                <FailoverQueueManager appType={client} />
+                <div className="border-t border-border/50 pt-4">
+                  <AutoFailoverConfigPanel appType={client} />
+                </div>
+              </section>
+            </div>
           </TabsContent>
         ))}
       </Tabs>
 
       {/* 全局段：与具体客户端无关的设置 */}
       <Accordion type="multiple" defaultValue={[]} className="w-full space-y-3">
-        {/* Local Proxy / 服务设置 */}
-        <AccordionItem
-          value="proxy"
-          className="rounded-xl glass-card overflow-hidden"
-        >
-          <AccordionTrigger className="px-4 py-3 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-            <div className="flex items-center gap-3">
-              <Server className="h-5 w-5 text-green-500" />
-              <div className="text-left">
-                <h3 className="text-sm font-semibold">
-                  {t("settings.advanced.proxy.title")}
-                </h3>
-                <p className="text-xs text-muted-foreground font-normal">
-                  {t("settings.advanced.proxy.description")}
-                </p>
-              </div>
-              <Badge
-                variant={isRunning ? "default" : "secondary"}
-                className="gap-1.5 h-6 ml-auto mr-2"
-              >
-                <Activity
-                  className={`h-3 w-3 ${isRunning ? "animate-pulse" : ""}`}
-                />
-                {isRunning
-                  ? t("settings.advanced.proxy.running")
-                  : t("settings.advanced.proxy.stopped")}
-              </Badge>
-            </div>
-          </AccordionTrigger>
-          <AccordionContent className="px-4 pb-4 pt-3 border-t border-border/50">
-            <ProxyPanel
-              enableLocalProxy={settings?.enableLocalProxy ?? false}
-              onEnableLocalProxyChange={(checked) =>
-                onAutoSave({ enableLocalProxy: checked })
-              }
-              onToggleProxy={handleToggleProxy}
-              isProxyPending={isProxyPending}
-            />
-          </AccordionContent>
-        </AccordionItem>
-
         {/* Rectifier */}
         <AccordionItem
           value="rectifier"
@@ -435,16 +412,37 @@ interface SectionHeaderProps {
 
 function SectionHeader({ icon, title, description }: SectionHeaderProps) {
   return (
-    <div className="flex items-start gap-2 pb-2 border-b border-border/40">
+    <div className="flex items-start gap-2">
       <span className="mt-0.5">{icon}</span>
       <div className="text-left">
-        <h3 className="text-sm font-semibold">{title}</h3>
+        <h3 className="text-sm font-semibold leading-tight">{title}</h3>
         {description ? (
-          <p className="text-xs text-muted-foreground font-normal">
+          <p className="mt-0.5 text-xs text-muted-foreground font-normal">
             {description}
           </p>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function SwitchRow({
+  title,
+  checked,
+  onCheckedChange,
+}: {
+  title: string;
+  checked: boolean;
+  onCheckedChange: (value: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+      <span className="text-sm">{title}</span>
+      <Switch
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        aria-label={title}
+      />
     </div>
   );
 }
@@ -485,7 +483,11 @@ function ClientTakeoverToggle({ appType }: { appType: ModelRoutingClient }) {
 
   return (
     <div className="flex items-center justify-between rounded-md border border-primary/20 bg-background/60 px-3 py-2">
-      <span className="text-sm font-medium">{CLIENT_LABEL[appType]}</span>
+      <span className="text-sm font-medium">
+        {isEnabled
+          ? t("proxy.takeover.statusOn", { defaultValue: "已接管" })
+          : t("proxy.takeover.statusOff", { defaultValue: "未接管" })}
+      </span>
       <Switch
         checked={isEnabled}
         onCheckedChange={handleChange}

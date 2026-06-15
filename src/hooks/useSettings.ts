@@ -104,7 +104,7 @@ export function useSettings(): UseSettingsResult {
   const resetSettings = useCallback(() => {
     resetForm(data ?? null);
     syncLanguage(initialLanguage);
-    // 表驱动遍历目录映射表，保证所有应用目录（含 hermes）行为一致
+    // 表驱动遍历目录映射表，保证所有应用目录行为一致
     resetAllDirectories(
       Object.fromEntries(
         Object.entries(DIRECTORY_KEY_TO_SETTINGS_FIELD).map(([key, field]) => [
@@ -191,7 +191,7 @@ export function useSettings(): UseSettingsResult {
 
         const payload: Settings = {
           ...restSettings,
-          // 表驱动：所有应用目录字段统一 trim/sanitize（含 hermesConfigDir）
+          // 表驱动：所有应用目录字段统一 trim/sanitize
           ...sanitizeDirectorySettingsFields(mergedSettings),
           language: mergedSettings.language,
         };
@@ -302,7 +302,7 @@ export function useSettings(): UseSettingsResult {
       if (!mergedSettings) return null;
       try {
         const sanitizedAppDir = sanitizeDir(appConfigDir);
-        // 表驱动：所有应用目录字段统一 trim/sanitize（含 hermesConfigDir）
+        // 表驱动：所有应用目录字段统一 trim/sanitize
         const sanitizedDirs = sanitizeDirectorySettingsFields(mergedSettings);
         const previousAppDir = initialAppConfigDir;
         const {
@@ -393,7 +393,7 @@ export function useSettings(): UseSettingsResult {
           console.warn("[useSettings] Failed to refresh tray menu", error);
         }
 
-        // 如果任一应用（Claude/Codex/Gemini/OpenCode/OpenClaw/Hermes）的目录覆盖发生变化，
+        // 如果任一应用（Claude/Codex/Gemini/OpenCode）的目录覆盖发生变化，
         // 则立即将"当前使用的供应商"写回对应应用的 live 配置
         // 如果插件同步已经执行过 syncCurrentProvidersLiveSafe，则跳过避免重复
         const directoriesChanged = DIRECTORY_SETTINGS_FIELDS.some(

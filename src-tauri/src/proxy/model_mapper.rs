@@ -2,9 +2,12 @@
 //!
 //! 在请求转发前，根据 Provider 配置替换请求中的模型名称
 
-use crate::claude_desktop_config::ONE_M_CONTEXT_MARKER;
 use crate::provider::Provider;
 use serde_json::Value;
+
+/// Claude Code 通过 `[1m]` 后缀声明 100 万上下文能力的本地标记。
+/// 上游 API 通常不接受该本地能力标记，转发/统计/校验前需要据此剥离。
+pub const ONE_M_CONTEXT_MARKER: &str = "[1m]";
 
 /// 模型映射配置
 pub struct ModelMapping {

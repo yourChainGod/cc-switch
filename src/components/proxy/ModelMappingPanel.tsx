@@ -9,12 +9,10 @@ import {
   Loader2,
   ArrowRight,
   FlaskConical,
-  Info,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -36,7 +34,6 @@ import type {
 } from "@/types/modelRouting";
 import { createDefaultRule } from "@/types/modelRouting";
 
-const CLIENTS: ModelRoutingClient[] = ["claude", "codex", "gemini"];
 const MATCH_TYPES: MatchType[] = [
   "exact",
   "prefix",
@@ -45,7 +42,7 @@ const MATCH_TYPES: MatchType[] = [
   "regex",
 ];
 
-export function ModelMappingPanel({ client }: { client?: ModelRoutingClient }) {
+export function ModelMappingPanel({ client }: { client: ModelRoutingClient }) {
   const { t } = useTranslation();
   const { data: config, isLoading } = useModelRoutingConfig();
   const updateConfig = useUpdateModelRoutingConfig();
@@ -82,18 +79,6 @@ export function ModelMappingPanel({ client }: { client?: ModelRoutingClient }) {
     );
   }
 
-  const hint = (
-    <div className="flex items-start gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3">
-      <Info className="mt-0.5 h-4 w-4 flex-shrink-0 text-blue-500" />
-      <p className="text-xs text-blue-700 dark:text-blue-300">
-        {t("proxy.modelMapping.hint", {
-          defaultValue:
-            "按客户端区分的「真正」模型映射：当请求模型命中某条规则时，目标模型即为最终上游模型，覆盖供应商的 catalog / 环境变量映射。未配置任何规则时不影响现有行为。自上而下首条命中生效。",
-        })}
-      </p>
-    </div>
-  );
-
   const saveButton = (
     <div className="flex justify-end pt-1">
       <Button onClick={handleSave} disabled={updateConfig.isPending}>
@@ -112,44 +97,14 @@ export function ModelMappingPanel({ client }: { client?: ModelRoutingClient }) {
     </div>
   );
 
-  // 单客户端模式：只渲染该客户端的规则编辑器（保存仍提交完整草稿，其余客户端沿用服务端配置）
-  if (client) {
-    return (
-      <div className="space-y-4">
-        {hint}
-        <ClientRuleEditor
-          client={client}
-          rules={draft[client]}
-          onChange={(rules) => setRules(client, rules)}
-        />
-        {saveButton}
-      </div>
-    );
-  }
-
+  // 单客户端规则编辑器；保存仍提交完整草稿，其余客户端沿用服务端配置
   return (
     <div className="space-y-4">
-      {hint}
-
-      <Tabs defaultValue="claude" className="w-full">
-        <TabsList className="grid w-full grid-cols-3">
-          {CLIENTS.map((c) => (
-            <TabsTrigger key={c} value={c} className="capitalize">
-              {c}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-        {CLIENTS.map((client) => (
-          <TabsContent key={client} value={client} className="mt-4">
-            <ClientRuleEditor
-              client={client}
-              rules={draft[client]}
-              onChange={(rules) => setRules(client, rules)}
-            />
-          </TabsContent>
-        ))}
-      </Tabs>
-
+      <ClientRuleEditor
+        client={client}
+        rules={draft[client]}
+        onChange={(rules) => setRules(client, rules)}
+      />
       {saveButton}
     </div>
   );
@@ -201,12 +156,26 @@ function ClientRuleEditor({ client, rules, onChange }: ClientRuleEditorProps) {
         <div className="space-y-2">
           {/* 表头 */}
           <div className="hidden grid-cols-[auto_7rem_1fr_auto_1fr_auto] items-center gap-2 px-1 text-xs text-muted-foreground md:grid">
-            <span>{t("proxy.modelMapping.col.enabled", { defaultValue: "启用" })}</span>
-            <span>{t("proxy.modelMapping.col.matchType", { defaultValue: "匹配方式" })}</span>
-            <span>{t("proxy.modelMapping.col.pattern", { defaultValue: "匹配模式" })}</span>
+            <span>
+              {t("proxy.modelMapping.col.enabled", { defaultValue: "启用" })}
+            </span>
+            <span>
+              {t("proxy.modelMapping.col.matchType", {
+                defaultValue: "匹配方式",
+              })}
+            </span>
+            <span>
+              {t("proxy.modelMapping.col.pattern", {
+                defaultValue: "匹配模式",
+              })}
+            </span>
             <span />
-            <span>{t("proxy.modelMapping.col.target", { defaultValue: "目标模型" })}</span>
-            <span>{t("proxy.modelMapping.col.actions", { defaultValue: "操作" })}</span>
+            <span>
+              {t("proxy.modelMapping.col.target", { defaultValue: "目标模型" })}
+            </span>
+            <span>
+              {t("proxy.modelMapping.col.actions", { defaultValue: "操作" })}
+            </span>
           </div>
 
           {rules.map((rule, index) => {
@@ -262,7 +231,9 @@ function ClientRuleEditor({ client, rules, onChange }: ClientRuleEditorProps) {
                 <ArrowRight className="hidden h-4 w-4 text-muted-foreground md:block" />
                 <Input
                   value={rule.target}
-                  onChange={(e) => updateRule(index, { target: e.target.value })}
+                  onChange={(e) =>
+                    updateRule(index, { target: e.target.value })
+                  }
                   placeholder={t("proxy.modelMapping.targetPlaceholder", {
                     defaultValue: "如 gpt-5.5",
                   })}

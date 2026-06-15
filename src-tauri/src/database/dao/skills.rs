@@ -44,7 +44,6 @@ impl Database {
                         codex: row.get(9)?,
                         gemini: row.get(10)?,
                         opencode: row.get(11)?,
-                        hermes: row.get(12)?,
                     },
                     installed_at: row.get(13)?,
                     content_hash: row.get(14)?,
@@ -88,7 +87,6 @@ impl Database {
                     codex: row.get(9)?,
                     gemini: row.get(10)?,
                     opencode: row.get(11)?,
-                    hermes: row.get(12)?,
                 },
                 installed_at: row.get(13)?,
                 content_hash: row.get(14)?,
@@ -125,7 +123,7 @@ impl Database {
                 skill.apps.codex,
                 skill.apps.gemini,
                 skill.apps.opencode,
-                skill.apps.hermes,
+                false,
                 skill.installed_at,
                 skill.content_hash,
                 skill.updated_at,
@@ -158,7 +156,7 @@ impl Database {
         let affected = conn
             .execute(
                 "UPDATE skills SET enabled_claude = ?1, enabled_codex = ?2, enabled_gemini = ?3, enabled_opencode = ?4, enabled_hermes = ?5 WHERE id = ?6",
-                params![apps.claude, apps.codex, apps.gemini, apps.opencode, apps.hermes, id],
+                params![apps.claude, apps.codex, apps.gemini, apps.opencode, false, id],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(affected > 0)

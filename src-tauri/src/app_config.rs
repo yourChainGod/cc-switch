@@ -15,8 +15,6 @@ pub struct McpApps {
     pub gemini: bool,
     #[serde(default)]
     pub opencode: bool,
-    #[serde(default)]
-    pub hermes: bool,
 }
 
 impl McpApps {
@@ -27,9 +25,6 @@ impl McpApps {
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
-            AppType::OpenClaw => false, // OpenClaw doesn't support MCP
-            AppType::Hermes => self.hermes,
-            AppType::ClaudeDesktop => false,
         }
     }
 
@@ -40,9 +35,6 @@ impl McpApps {
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
-            AppType::OpenClaw => {} // OpenClaw doesn't support MCP, ignore
-            AppType::Hermes => self.hermes = enabled,
-            AppType::ClaudeDesktop => {} // Claude Desktop 3P provider config doesn't support MCP here
         }
     }
 
@@ -61,15 +53,12 @@ impl McpApps {
         if self.opencode {
             apps.push(AppType::OpenCode);
         }
-        if self.hermes {
-            apps.push(AppType::Hermes);
-        }
         apps
     }
 
     /// 检查是否所有应用都未启用
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
+        !self.claude && !self.codex && !self.gemini && !self.opencode
     }
 }
 
@@ -84,8 +73,6 @@ pub struct SkillApps {
     pub gemini: bool,
     #[serde(default)]
     pub opencode: bool,
-    #[serde(default)]
-    pub hermes: bool,
 }
 
 impl SkillApps {
@@ -96,9 +83,6 @@ impl SkillApps {
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
-            AppType::Hermes => self.hermes,
-            AppType::OpenClaw => false, // OpenClaw doesn't support Skills
-            AppType::ClaudeDesktop => false,
         }
     }
 
@@ -109,9 +93,6 @@ impl SkillApps {
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
-            AppType::Hermes => self.hermes = enabled,
-            AppType::OpenClaw => {} // OpenClaw doesn't support Skills, ignore
-            AppType::ClaudeDesktop => {} // Claude Desktop 3P profiles don't use CC Switch skill sync
         }
     }
 
@@ -130,15 +111,12 @@ impl SkillApps {
         if self.opencode {
             apps.push(AppType::OpenCode);
         }
-        if self.hermes {
-            apps.push(AppType::Hermes);
-        }
         apps
     }
 
     /// 检查是否所有应用都未启用
     pub fn is_empty(&self) -> bool {
-        !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
+        !self.claude && !self.codex && !self.gemini && !self.opencode
     }
 
     /// 仅启用指定应用（其他应用设为禁用）
@@ -259,14 +237,6 @@ pub struct McpRoot {
     /// 旧的分应用存储（v3.6.x 及以前，保留用于迁移）
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub claude: McpConfig,
-    #[serde(
-        rename = "claude-desktop",
-        alias = "claudeDesktop",
-        alias = "claude_desktop",
-        default,
-        skip_serializing_if = "McpConfig::is_empty"
-    )]
-    pub claude_desktop: McpConfig,
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub codex: McpConfig,
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
@@ -274,12 +244,6 @@ pub struct McpRoot {
     /// OpenCode MCP 配置（v4.0.0+，实际使用 opencode.json）
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub opencode: McpConfig,
-    /// OpenClaw MCP 配置（v4.1.0+，实际使用 openclaw.json）
-    #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
-    pub openclaw: McpConfig,
-    /// Hermes MCP 配置（实际使用 config.yaml）
-    #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
-    pub hermes: McpConfig,
 }
 
 impl Default for McpRoot {
@@ -289,12 +253,9 @@ impl Default for McpRoot {
             servers: Some(HashMap::new()),
             // 旧结构保持空，仅用于反序列化旧配置时的迁移
             claude: McpConfig::default(),
-            claude_desktop: McpConfig::default(),
             codex: McpConfig::default(),
             gemini: McpConfig::default(),
             opencode: McpConfig::default(),
-            openclaw: McpConfig::default(),
-            hermes: McpConfig::default(),
         }
     }
 }
@@ -311,23 +272,12 @@ pub struct PromptConfig {
 pub struct PromptRoot {
     #[serde(default)]
     pub claude: PromptConfig,
-    #[serde(
-        rename = "claude-desktop",
-        alias = "claudeDesktop",
-        alias = "claude_desktop",
-        default
-    )]
-    pub claude_desktop: PromptConfig,
     #[serde(default)]
     pub codex: PromptConfig,
     #[serde(default)]
     pub gemini: PromptConfig,
     #[serde(default)]
     pub opencode: PromptConfig,
-    #[serde(default)]
-    pub openclaw: PromptConfig,
-    #[serde(default)]
-    pub hermes: PromptConfig,
 }
 
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
@@ -340,53 +290,36 @@ use crate::provider::ProviderManager;
 #[serde(rename_all = "lowercase")]
 pub enum AppType {
     Claude,
-    #[serde(
-        rename = "claude-desktop",
-        alias = "claude_desktop",
-        alias = "claudeDesktop"
-    )]
-    ClaudeDesktop,
     Codex,
     Gemini,
     OpenCode,
-    OpenClaw,
-    Hermes,
 }
 
 impl AppType {
     pub fn as_str(&self) -> &str {
         match self {
             AppType::Claude => "claude",
-            AppType::ClaudeDesktop => "claude-desktop",
             AppType::Codex => "codex",
             AppType::Gemini => "gemini",
             AppType::OpenCode => "opencode",
-            AppType::OpenClaw => "openclaw",
-            AppType::Hermes => "hermes",
         }
     }
 
     /// Check if this app uses additive mode
     ///
     /// - Switch mode (false): Only the current provider is written to live config (Claude, Codex, Gemini)
-    /// - Additive mode (true): All providers are written to live config (OpenCode, OpenClaw, Hermes)
+    /// - Additive mode (true): All providers are written to live config (OpenCode)
     pub fn is_additive_mode(&self) -> bool {
-        matches!(
-            self,
-            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes
-        )
+        matches!(self, AppType::OpenCode)
     }
 
     /// Return an iterator over all app types
     pub fn all() -> impl Iterator<Item = AppType> {
         [
             AppType::Claude,
-            AppType::ClaudeDesktop,
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
-            AppType::OpenClaw,
-            AppType::Hermes,
         ]
         .into_iter()
     }
@@ -399,16 +332,13 @@ impl FromStr for AppType {
         let normalized = s.trim().to_lowercase();
         match normalized.as_str() {
             "claude" => Ok(AppType::Claude),
-            "claude-desktop" | "claude_desktop" | "claudedesktop" => Ok(AppType::ClaudeDesktop),
             "codex" => Ok(AppType::Codex),
             "gemini" => Ok(AppType::Gemini),
             "opencode" => Ok(AppType::OpenCode),
-            "openclaw" => Ok(AppType::OpenClaw),
-            "hermes" => Ok(AppType::Hermes),
             other => Err(AppError::localized(
                 "unsupported_app",
-                format!("不支持的应用标识: '{other}'。可选值: claude, claude-desktop, codex, gemini, opencode, openclaw, hermes。"),
-                format!("Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, gemini, opencode, openclaw, hermes."),
+                format!("不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode。"),
+                format!("Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode."),
             )),
         }
     }
@@ -428,12 +358,6 @@ pub struct CommonConfigSnippets {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openclaw: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hermes: Option<String>,
 }
 
 impl CommonConfigSnippets {
@@ -441,12 +365,9 @@ impl CommonConfigSnippets {
     pub fn get(&self, app: &AppType) -> Option<&String> {
         match app {
             AppType::Claude => self.claude.as_ref(),
-            AppType::ClaudeDesktop => None,
             AppType::Codex => self.codex.as_ref(),
             AppType::Gemini => self.gemini.as_ref(),
             AppType::OpenCode => self.opencode.as_ref(),
-            AppType::OpenClaw => self.openclaw.as_ref(),
-            AppType::Hermes => self.hermes.as_ref(),
         }
     }
 
@@ -454,12 +375,9 @@ impl CommonConfigSnippets {
     pub fn set(&mut self, app: &AppType, snippet: Option<String>) {
         match app {
             AppType::Claude => self.claude = snippet,
-            AppType::ClaudeDesktop => {}
             AppType::Codex => self.codex = snippet,
             AppType::Gemini => self.gemini = snippet,
             AppType::OpenCode => self.opencode = snippet,
-            AppType::OpenClaw => self.openclaw = snippet,
-            AppType::Hermes => self.hermes = snippet,
         }
     }
 }
@@ -497,12 +415,9 @@ impl Default for MultiAppConfig {
     fn default() -> Self {
         let mut apps = HashMap::new();
         apps.insert("claude".to_string(), ProviderManager::default());
-        apps.insert("claude-desktop".to_string(), ProviderManager::default());
         apps.insert("codex".to_string(), ProviderManager::default());
         apps.insert("gemini".to_string(), ProviderManager::default());
         apps.insert("opencode".to_string(), ProviderManager::default());
-        apps.insert("openclaw".to_string(), ProviderManager::default());
-        apps.insert("hermes".to_string(), ProviderManager::default());
 
         Self {
             version: 2,
@@ -659,12 +574,9 @@ impl MultiAppConfig {
     pub fn mcp_for(&self, app: &AppType) -> &McpConfig {
         match app {
             AppType::Claude => &self.mcp.claude,
-            AppType::ClaudeDesktop => &self.mcp.claude_desktop,
             AppType::Codex => &self.mcp.codex,
             AppType::Gemini => &self.mcp.gemini,
             AppType::OpenCode => &self.mcp.opencode,
-            AppType::OpenClaw => &self.mcp.openclaw,
-            AppType::Hermes => &self.mcp.hermes,
         }
     }
 
@@ -672,12 +584,9 @@ impl MultiAppConfig {
     pub fn mcp_for_mut(&mut self, app: &AppType) -> &mut McpConfig {
         match app {
             AppType::Claude => &mut self.mcp.claude,
-            AppType::ClaudeDesktop => &mut self.mcp.claude_desktop,
             AppType::Codex => &mut self.mcp.codex,
             AppType::Gemini => &mut self.mcp.gemini,
             AppType::OpenCode => &mut self.mcp.opencode,
-            AppType::OpenClaw => &mut self.mcp.openclaw,
-            AppType::Hermes => &mut self.mcp.hermes,
         }
     }
 
@@ -692,8 +601,6 @@ impl MultiAppConfig {
         Self::auto_import_prompt_if_exists(&mut config, AppType::Codex)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::Gemini)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::OpenCode)?;
-        Self::auto_import_prompt_if_exists(&mut config, AppType::OpenClaw)?;
-        Self::auto_import_prompt_if_exists(&mut config, AppType::Hermes)?;
 
         Ok(config)
     }
@@ -711,12 +618,9 @@ impl MultiAppConfig {
     fn maybe_auto_import_prompts_for_existing_config(&mut self) -> Result<bool, AppError> {
         // 如果任一应用已经有提示词配置，说明用户已经在使用 Prompt 功能，避免再次自动导入
         if !self.prompts.claude.prompts.is_empty()
-            || !self.prompts.claude_desktop.prompts.is_empty()
             || !self.prompts.codex.prompts.is_empty()
             || !self.prompts.gemini.prompts.is_empty()
             || !self.prompts.opencode.prompts.is_empty()
-            || !self.prompts.openclaw.prompts.is_empty()
-            || !self.prompts.hermes.prompts.is_empty()
         {
             return Ok(false);
         }
@@ -729,8 +633,6 @@ impl MultiAppConfig {
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
-            AppType::OpenClaw,
-            AppType::Hermes,
         ] {
             // 复用已有的单应用导入逻辑
             if Self::auto_import_prompt_if_exists(self, app)? {
@@ -798,12 +700,9 @@ impl MultiAppConfig {
         // 插入到对应的应用配置中
         let prompts = match app {
             AppType::Claude => &mut config.prompts.claude.prompts,
-            AppType::ClaudeDesktop => &mut config.prompts.claude_desktop.prompts,
             AppType::Codex => &mut config.prompts.codex.prompts,
             AppType::Gemini => &mut config.prompts.gemini.prompts,
             AppType::OpenCode => &mut config.prompts.opencode.prompts,
-            AppType::OpenClaw => &mut config.prompts.openclaw.prompts,
-            AppType::Hermes => &mut config.prompts.hermes.prompts,
         };
 
         prompts.insert(id, prompt);
@@ -840,12 +739,9 @@ impl MultiAppConfig {
         ] {
             let old_servers = match app {
                 AppType::Claude => &self.mcp.claude.servers,
-                AppType::ClaudeDesktop => continue, // Claude Desktop 3P profiles don't use MCP here
                 AppType::Codex => &self.mcp.codex.servers,
                 AppType::Gemini => &self.mcp.gemini.servers,
                 AppType::OpenCode => &self.mcp.opencode.servers,
-                AppType::OpenClaw => continue, // OpenClaw MCP is still in development, skip
-                AppType::Hermes => continue,   // Hermes didn't exist in v3.6.x, skip
             };
 
             for (id, entry) in old_servers {
@@ -960,23 +856,6 @@ mod tests {
     use std::env;
     use std::fs;
     use tempfile::TempDir;
-
-    #[test]
-    fn app_type_parses_claude_desktop_aliases() {
-        assert_eq!(
-            "claude-desktop".parse::<AppType>().unwrap(),
-            AppType::ClaudeDesktop
-        );
-        assert_eq!(
-            "claude_desktop".parse::<AppType>().unwrap(),
-            AppType::ClaudeDesktop
-        );
-        assert_eq!(
-            "claudeDesktop".parse::<AppType>().unwrap(),
-            AppType::ClaudeDesktop
-        );
-        assert_eq!(AppType::ClaudeDesktop.as_str(), "claude-desktop");
-    }
 
     struct TempHome {
         #[allow(dead_code)] // 字段通过 Drop trait 管理临时目录生命周期

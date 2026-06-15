@@ -10,8 +10,6 @@
 
 use crate::app_config::AppType;
 
-pub(crate) const CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID: &str = "claude-desktop-official";
-
 /// 单条官方供应商种子定义。
 pub(crate) struct OfficialProviderSeed {
     pub id: &'static str,
@@ -36,16 +34,6 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         icon: "anthropic",
         icon_color: "#D4915D",
         // 空 env 让用户走 Claude CLI 默认认证流程
-        settings_config_json: r#"{"env":{}}"#,
-    },
-    OfficialProviderSeed {
-        id: CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
-        app_type: AppType::ClaudeDesktop,
-        name: "Claude Desktop Official",
-        website_url: "https://claude.ai/download",
-        icon: "anthropic",
-        icon_color: "#D4915D",
-        // 空 env 只是占位；切换该 provider 时会恢复 Claude Desktop 1P 模式
         settings_config_json: r#"{"env":{}}"#,
     },
     OfficialProviderSeed {
@@ -82,13 +70,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn official_seeds_include_claude_desktop() {
+    fn official_seeds_include_claude() {
         let seed = OFFICIAL_SEEDS
             .iter()
-            .find(|seed| seed.id == CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID)
-            .expect("claude desktop official seed");
+            .find(|seed| seed.id == "claude-official")
+            .expect("claude official seed");
 
-        assert_eq!(seed.app_type, AppType::ClaudeDesktop);
-        assert!(is_official_seed_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID));
+        assert_eq!(seed.app_type, AppType::Claude);
+        assert!(is_official_seed_id("claude-official"));
     }
 }

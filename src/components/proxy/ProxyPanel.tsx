@@ -1,45 +1,24 @@
 import { useState, useEffect } from "react";
-import {
-  Activity,
-  Clock,
-  TrendingUp,
-  Server,
-  ListOrdered,
-  Save,
-  Loader2,
-  Zap,
-  Power,
-} from "lucide-react";
+import { Save, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
-import { ToggleRow } from "@/components/ui/toggle-row";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { toast } from "sonner";
-import { useFailoverQueue } from "@/lib/query/failover";
-import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
-import { useProviderHealth } from "@/lib/query/failover";
 import {
   useGlobalProxyConfig,
   useUpdateGlobalProxyConfig,
 } from "@/lib/query/proxy";
-import type { ProxyStatus } from "@/types/proxy";
 import { useTranslation } from "react-i18next";
 
-interface ProxyPanelProps {
-  enableLocalProxy: boolean;
-  onEnableLocalProxyChange: (checked: boolean) => void;
-  onToggleProxy: (checked: boolean) => Promise<void>;
-  isProxyPending: boolean;
-}
-
-export function ProxyPanel({
-  enableLocalProxy,
-  onEnableLocalProxyChange,
-  onToggleProxy,
-  isProxyPending,
-}: ProxyPanelProps) {
+/**
+ * 服务设置（设置-only）
+ *
+ * 运行状态 / 启停 / 统计 / 服务地址由顶部服务区统一呈现，本组件内联在服务卡内，
+ * 只负责可配置项：停止态编辑监听地址/端口；运行态展示当前供应商 + 日志开关。
+ */
+export function ProxyPanel() {
   const { t } = useTranslation();
   const { status, isRunning } = useProxyStatus();
 
@@ -58,12 +37,6 @@ export function ProxyPanel({
       setListenPort(String(globalConfig.listenPort));
     }
   }, [globalConfig]);
-
-  // 获取所有三个应用类型的故障转移队列
-  // 启用自动故障转移后，将按队列优先级（P1→P2→...）选择供应商
-  const { data: claudeQueue = [] } = useFailoverQueue("claude");
-  const { data: codexQueue = [] } = useFailoverQueue("codex");
-  const { data: geminiQueue = [] } = useFailoverQueue("gemini");
 
   const handleLoggingChange = async (enabled: boolean) => {
     if (!globalConfig) return;
@@ -161,491 +134,139 @@ export function ProxyPanel({
     }
   };
 
-  const formatUptime = (seconds: number): string => {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-
-    if (hours > 0) {
-      return `${hours}h ${minutes}m ${secs}s`;
-    } else if (minutes > 0) {
-      return `${minutes}m ${secs}s`;
-    } else {
-      return `${secs}s`;
-    }
-  };
-
-  // 格式化地址用于 URL（IPv6 需要方括号）
-  const formatAddressForUrl = (address: string, port: number): string => {
-    const isIPv6 = address.includes(":");
-    const host = isIPv6 ? `[${address}]` : address;
-    return `http://${host}:${port}`;
-  };
-
-  return (
-    <>
-      <section className="space-y-4">
-        {/* [1] Enable proxy button on main page — always visible */}
-        <ToggleRow
-          icon={<Zap className="h-4 w-4 text-green-500" />}
-          title={t("settings.advanced.proxy.enableFeature")}
-          description={t("settings.advanced.proxy.enableFeatureDescription")}
-          checked={enableLocalProxy}
-          onCheckedChange={onEnableLocalProxyChange}
-        />
-
-        {/* [2] Proxy service toggle — always visible */}
-        <div className="flex items-center justify-between rounded-xl border border-border bg-card/50 p-4 transition-colors hover:bg-muted/50">
-          <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-background ring-1 ring-border">
-              <Power className="h-4 w-4 text-green-500" />
+  // 运行态：当前供应商 + 日志开关（地址/统计在顶部服务区）
+  if (isRunning && status) {
+    return (
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">{t("provider.inUse")}</p>
+          {status.active_targets && status.active_targets.length > 0 ? (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {status.active_targets.map((target) => (
+                <div
+                  key={target.app_type}
+                  className="flex items-center justify-between rounded-md border border-border bg-background/60 px-2 py-1.5 text-xs"
+                >
+                  <span className="text-muted-foreground">
+                    {target.app_type}
+                  </span>
+                  <span
+                    className="ml-2 font-medium truncate text-foreground"
+                    title={target.provider_name}
+                  >
+                    {target.provider_name}
+                  </span>
+                </div>
+              ))}
             </div>
-            <div className="space-y-1">
-              <p className="text-sm font-medium leading-none">
-                {t("proxyConfig.proxyEnabled", {
-                  defaultValue: "代理服务",
-                })}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {isRunning
-                  ? t("settings.advanced.proxy.running")
-                  : t("settings.advanced.proxy.stopped")}
-              </p>
-            </div>
-          </div>
-          <Switch
-            checked={isRunning}
-            onCheckedChange={onToggleProxy}
-            disabled={isProxyPending}
-          />
+          ) : status.current_provider ? (
+            <p className="text-sm text-muted-foreground">
+              {t("proxy.panel.currentProvider", {
+                defaultValue: "当前 Provider：",
+              })}{" "}
+              <span className="font-medium text-foreground">
+                {status.current_provider}
+              </span>
+            </p>
+          ) : (
+            <p className="text-sm text-yellow-600 dark:text-yellow-400">
+              {t("proxy.panel.waitingFirstRequest", {
+                defaultValue: "当前 Provider：等待首次请求…",
+              })}
+            </p>
+          )}
         </div>
 
-        {/* Running state: service info + stats */}
-        {isRunning && status ? (
-          <div className="space-y-6">
-            {/* [4] Running info: address + current provider */}
-            <div className="rounded-lg border border-border bg-muted/40 p-4 space-y-4">
-              <div>
-                <p className="text-xs text-muted-foreground mb-2">
-                  {t("proxy.panel.serviceAddress", {
-                    defaultValue: "服务地址",
-                  })}
-                </p>
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <code className="flex-1 text-sm bg-background px-3 py-2 rounded border border-border/60">
-                    {formatAddressForUrl(status.address, status.port)}
-                  </code>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      navigator.clipboard.writeText(
-                        formatAddressForUrl(status.address, status.port),
-                      );
-                      toast.success(
-                        t("proxy.panel.addressCopied", {
-                          defaultValue: "地址已复制",
-                        }),
-                        { closeButton: true },
-                      );
-                    }}
-                  >
-                    {t("common.copy")}
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  {t("proxy.settings.restartRequired", {
-                    defaultValue: "修改监听地址/端口需要先停止代理服务",
-                  })}
-                </p>
-              </div>
-
-              <div className="pt-3 border-t border-border space-y-2">
-                <p className="text-xs text-muted-foreground">
-                  {t("provider.inUse")}
-                </p>
-                {status.active_targets && status.active_targets.length > 0 ? (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {status.active_targets.map((target) => (
-                      <div
-                        key={target.app_type}
-                        className="flex items-center justify-between rounded-md border border-border bg-background/60 px-2 py-1.5 text-xs"
-                      >
-                        <span className="text-muted-foreground">
-                          {target.app_type}
-                        </span>
-                        <span
-                          className="ml-2 font-medium truncate text-foreground"
-                          title={target.provider_name}
-                        >
-                          {target.provider_name}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : status.current_provider ? (
-                  <p className="text-sm text-muted-foreground">
-                    {t("proxy.panel.currentProvider", {
-                      defaultValue: "当前 Provider：",
-                    })}{" "}
-                    <span className="font-medium text-foreground">
-                      {status.current_provider}
-                    </span>
-                  </p>
-                ) : (
-                  <p className="text-sm text-yellow-600 dark:text-yellow-400">
-                    {t("proxy.panel.waitingFirstRequest", {
-                      defaultValue: "当前 Provider：等待首次请求…",
-                    })}
-                  </p>
-                )}
-              </div>
-
-              {/* [5] Logging toggle */}
-              <div className="pt-3 border-t border-border">
-                <div className="flex items-center justify-between rounded-md border border-border bg-background/60 px-3 py-2">
-                  <div className="space-y-0.5">
-                    <Label className="text-sm font-medium">
-                      {t("proxy.settings.fields.enableLogging.label", {
-                        defaultValue: "启用日志记录",
-                      })}
-                    </Label>
-                    <p className="text-xs text-muted-foreground">
-                      {t("proxy.settings.fields.enableLogging.description", {
-                        defaultValue: "记录所有代理请求，便于排查问题",
-                      })}
-                    </p>
-                  </div>
-                  <Switch
-                    checked={globalConfig?.enableLogging ?? true}
-                    onCheckedChange={handleLoggingChange}
-                    disabled={updateGlobalConfig.isPending}
-                  />
-                </div>
-              </div>
-
-              {/* [6] Provider queues */}
-              {(claudeQueue.length > 0 ||
-                codexQueue.length > 0 ||
-                geminiQueue.length > 0) && (
-                <div className="pt-3 border-t border-border space-y-3">
-                  <div className="flex items-center gap-2">
-                    <ListOrdered className="h-3.5 w-3.5 text-muted-foreground" />
-                    <p className="text-xs text-muted-foreground">
-                      {t("proxy.failoverQueue.title")}
-                    </p>
-                  </div>
-
-                  {claudeQueue.length > 0 && (
-                    <ProviderQueueGroup
-                      appType="claude"
-                      appLabel="Claude"
-                      targets={claudeQueue.map((item) => ({
-                        id: item.providerId,
-                        name: item.providerName,
-                      }))}
-                      status={status}
-                    />
-                  )}
-
-                  {codexQueue.length > 0 && (
-                    <ProviderQueueGroup
-                      appType="codex"
-                      appLabel="Codex"
-                      targets={codexQueue.map((item) => ({
-                        id: item.providerId,
-                        name: item.providerName,
-                      }))}
-                      status={status}
-                    />
-                  )}
-
-                  {geminiQueue.length > 0 && (
-                    <ProviderQueueGroup
-                      appType="gemini"
-                      appLabel="Gemini"
-                      targets={geminiQueue.map((item) => ({
-                        id: item.providerId,
-                        name: item.providerName,
-                      }))}
-                      status={status}
-                    />
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* [7] Stats cards */}
-            <div className="grid gap-3 md:grid-cols-4">
-              <StatCard
-                icon={<Activity className="h-4 w-4" />}
-                label={t("proxy.panel.stats.activeConnections", {
-                  defaultValue: "活跃连接",
-                })}
-                value={status.active_connections}
-              />
-              <StatCard
-                icon={<TrendingUp className="h-4 w-4" />}
-                label={t("proxy.panel.stats.totalRequests", {
-                  defaultValue: "总请求数",
-                })}
-                value={status.total_requests}
-              />
-              <StatCard
-                icon={<Clock className="h-4 w-4" />}
-                label={t("proxy.panel.stats.successRate", {
-                  defaultValue: "成功率",
-                })}
-                value={`${status.success_rate.toFixed(1)}%`}
-                variant={status.success_rate > 90 ? "success" : "warning"}
-              />
-              <StatCard
-                icon={<Clock className="h-4 w-4" />}
-                label={t("proxy.panel.stats.uptime", {
-                  defaultValue: "运行时间",
-                })}
-                value={formatUptime(status.uptime_seconds)}
-              />
-            </div>
+        <div className="flex items-center justify-between rounded-md border border-border bg-background/60 px-3 py-2">
+          <div className="space-y-0.5">
+            <Label className="text-sm font-medium">
+              {t("proxy.settings.fields.enableLogging.label", {
+                defaultValue: "启用日志记录",
+              })}
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              {t("proxy.settings.fields.enableLogging.description", {
+                defaultValue: "记录所有代理请求，便于排查问题",
+              })}
+            </p>
           </div>
-        ) : (
-          <div className="space-y-6">
-            {/* [8] Basic settings — address/port (only when stopped) */}
-            <div className="rounded-lg border border-border bg-muted/40 p-4 space-y-4">
-              <div>
-                <h4 className="text-sm font-semibold">
-                  {t("proxy.settings.basic.title", {
-                    defaultValue: "基础设置",
-                  })}
-                </h4>
-                <p className="text-xs text-muted-foreground">
-                  {t("proxy.settings.basic.description", {
-                    defaultValue: "配置代理服务监听的地址与端口。",
-                  })}
-                </p>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="listen-address">
-                    {t("proxy.settings.fields.listenAddress.label", {
-                      defaultValue: "监听地址",
-                    })}
-                  </Label>
-                  <Input
-                    id="listen-address"
-                    value={listenAddress}
-                    onChange={(e) => setListenAddress(e.target.value)}
-                    placeholder={t(
-                      "proxy.settings.fields.listenAddress.placeholder",
-                      {
-                        defaultValue: "127.0.0.1",
-                      },
-                    )}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t("proxy.settings.fields.listenAddress.description", {
-                      defaultValue:
-                        "代理服务器监听的 IP 地址（推荐 127.0.0.1）",
-                    })}
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="listen-port">
-                    {t("proxy.settings.fields.listenPort.label", {
-                      defaultValue: "监听端口",
-                    })}
-                  </Label>
-                  <Input
-                    id="listen-port"
-                    type="number"
-                    value={listenPort}
-                    onChange={(e) => setListenPort(e.target.value)}
-                    placeholder={t(
-                      "proxy.settings.fields.listenPort.placeholder",
-                      {
-                        defaultValue: "15721",
-                      },
-                    )}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {t("proxy.settings.fields.listenPort.description", {
-                      defaultValue: "代理服务器监听的端口号（1024 ~ 65535）",
-                    })}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex justify-end">
-                <Button
-                  size="sm"
-                  onClick={handleSaveBasicConfig}
-                  disabled={updateGlobalConfig.isPending}
-                >
-                  {updateGlobalConfig.isPending ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      {t("common.saving", { defaultValue: "保存中..." })}
-                    </>
-                  ) : (
-                    <>
-                      <Save className="mr-2 h-4 w-4" />
-                      {t("common.save", { defaultValue: "保存" })}
-                    </>
-                  )}
-                </Button>
-              </div>
-            </div>
-
-            {/* Stopped hint */}
-            <div className="text-center py-6 text-muted-foreground">
-              <div className="mx-auto w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-4">
-                <Server className="h-8 w-8" />
-              </div>
-              <p className="text-base font-medium text-foreground mb-1">
-                {t("proxy.panel.stoppedTitle", {
-                  defaultValue: "代理服务已停止",
-                })}
-              </p>
-              <p className="text-sm text-muted-foreground">
-                {t("proxy.panel.stoppedDescription", {
-                  defaultValue: "使用上方开关即可启动服务",
-                })}
-              </p>
-            </div>
-          </div>
-        )}
-      </section>
-    </>
-  );
-}
-
-interface StatCardProps {
-  icon: React.ReactNode;
-  label: string;
-  value: string | number;
-  variant?: "default" | "success" | "warning";
-}
-
-function StatCard({ icon, label, value, variant = "default" }: StatCardProps) {
-  const variantStyles = {
-    default: "",
-    success: "border-green-500/40 bg-green-500/5",
-    warning: "border-yellow-500/40 bg-yellow-500/5",
-  };
-
-  return (
-    <div
-      className={`rounded-lg border border-border bg-card/60 p-4 text-sm text-muted-foreground ${variantStyles[variant]}`}
-    >
-      <div className="flex items-center gap-2 text-muted-foreground mb-2">
-        {icon}
-        <span className="text-xs">{label}</span>
-      </div>
-      <p className="text-xl font-semibold text-foreground">{value}</p>
-    </div>
-  );
-}
-
-interface ProviderQueueGroupProps {
-  appType: string;
-  appLabel: string;
-  targets: Array<{
-    id: string;
-    name: string;
-  }>;
-  status: ProxyStatus;
-}
-
-function ProviderQueueGroup({
-  appType,
-  appLabel,
-  targets,
-  status,
-}: ProviderQueueGroupProps) {
-  // 查找该应用类型的当前活跃目标
-  const activeTarget = status.active_targets?.find(
-    (t) => t.app_type === appType,
-  );
-
-  return (
-    <div className="space-y-2">
-      {/* 应用类型标题 */}
-      <div className="flex items-center gap-2 px-2">
-        <span className="text-xs font-semibold text-foreground/80">
-          {appLabel}
-        </span>
-        <div className="flex-1 h-px bg-border/50" />
-      </div>
-
-      {/* 供应商列表 */}
-      <div className="space-y-1.5">
-        {targets.map((target, index) => (
-          <ProviderQueueItem
-            key={target.id}
-            provider={target}
-            priority={index + 1}
-            appType={appType}
-            isCurrent={activeTarget?.provider_id === target.id}
+          <Switch
+            checked={globalConfig?.enableLogging ?? true}
+            onCheckedChange={handleLoggingChange}
+            disabled={updateGlobalConfig.isPending}
           />
-        ))}
+        </div>
       </div>
-    </div>
-  );
-}
+    );
+  }
 
-interface ProviderQueueItemProps {
-  provider: {
-    id: string;
-    name: string;
-  };
-  priority: number;
-  appType: string;
-  isCurrent: boolean;
-}
-
-function ProviderQueueItem({
-  provider,
-  priority,
-  appType,
-  isCurrent,
-}: ProviderQueueItemProps) {
-  const { t } = useTranslation();
-  const { data: health } = useProviderHealth(provider.id, appType);
-
+  // 停止态：可编辑监听地址/端口
   return (
-    <div
-      className={`flex items-center justify-between rounded-md border px-3 py-2 text-sm transition-colors ${
-        isCurrent
-          ? "border-primary/40 bg-primary/10 text-primary font-medium"
-          : "border-border bg-background/60"
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <span
-          className={`flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full text-xs font-bold ${
-            isCurrent
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted text-muted-foreground"
-          }`}
-        >
-          {priority}
-        </span>
-        <span className={isCurrent ? "" : "text-foreground"}>
-          {provider.name}
-        </span>
-        {isCurrent && (
-          <span className="text-xs px-1.5 py-0.5 rounded bg-primary/20 text-primary">
-            {t("provider.inUse")}
-          </span>
-        )}
+    <div className="space-y-4">
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="listen-address">
+            {t("proxy.settings.fields.listenAddress.label", {
+              defaultValue: "监听地址",
+            })}
+          </Label>
+          <Input
+            id="listen-address"
+            value={listenAddress}
+            onChange={(e) => setListenAddress(e.target.value)}
+            placeholder={t("proxy.settings.fields.listenAddress.placeholder", {
+              defaultValue: "127.0.0.1",
+            })}
+          />
+          <p className="text-xs text-muted-foreground">
+            {t("proxy.settings.fields.listenAddress.description", {
+              defaultValue: "代理服务器监听的 IP 地址（推荐 127.0.0.1）",
+            })}
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="listen-port">
+            {t("proxy.settings.fields.listenPort.label", {
+              defaultValue: "监听端口",
+            })}
+          </Label>
+          <Input
+            id="listen-port"
+            type="number"
+            value={listenPort}
+            onChange={(e) => setListenPort(e.target.value)}
+            placeholder={t("proxy.settings.fields.listenPort.placeholder", {
+              defaultValue: "15721",
+            })}
+          />
+          <p className="text-xs text-muted-foreground">
+            {t("proxy.settings.fields.listenPort.description", {
+              defaultValue: "代理服务器监听的端口号（1024 ~ 65535）",
+            })}
+          </p>
+        </div>
       </div>
-      {/* 健康徽章 */}
-      <ProviderHealthBadge
-        consecutiveFailures={health?.consecutive_failures ?? 0}
-        isHealthy={health?.is_healthy}
-      />
+
+      <div className="flex justify-end">
+        <Button
+          size="sm"
+          onClick={handleSaveBasicConfig}
+          disabled={updateGlobalConfig.isPending}
+        >
+          {updateGlobalConfig.isPending ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              {t("common.saving", { defaultValue: "保存中..." })}
+            </>
+          ) : (
+            <>
+              <Save className="mr-2 h-4 w-4" />
+              {t("common.save", { defaultValue: "保存" })}
+            </>
+          )}
+        </Button>
+      </div>
     </div>
   );
 }

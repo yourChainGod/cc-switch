@@ -1771,9 +1771,6 @@ fn model_pricing_candidates(model_id: &str) -> Vec<String> {
         if let Some(stripped) = strip_known_model_namespace(&candidate) {
             queue.push(stripped);
         }
-        if let Some(stripped) = strip_claude_desktop_non_anthropic_prefix(&candidate) {
-            queue.push(stripped);
-        }
         if let Some(stripped) = strip_bedrock_model_version_suffix(&candidate) {
             queue.push(stripped);
         }
@@ -1803,7 +1800,7 @@ fn clean_model_id_for_pricing(model_id: &str) -> String {
         .to_ascii_lowercase();
 
     normalized
-        .trim_end_matches(crate::claude_desktop_config::ONE_M_CONTEXT_MARKER)
+        .trim_end_matches(crate::proxy::model_mapper::ONE_M_CONTEXT_MARKER)
         .trim()
         .to_string()
 }
@@ -1838,53 +1835,6 @@ fn strip_known_model_namespace(model_id: &str) -> Option<String> {
     }
 
     None
-}
-
-fn strip_claude_desktop_non_anthropic_prefix(model_id: &str) -> Option<String> {
-    const NON_ANTHROPIC_MARKERS: &[&str] = &[
-        "abab",
-        "ark-code",
-        "arctic",
-        "astron",
-        "codex",
-        "command-r",
-        "deepseek",
-        "doubao",
-        "ernie",
-        "gemini",
-        "gemma",
-        "glm",
-        "gpt",
-        "grok",
-        "hermes",
-        "hy3",
-        "hunyuan",
-        "jamba",
-        "kimi",
-        "lfm",
-        "llama",
-        "longcat",
-        "mercury",
-        "mimo",
-        "minimax",
-        "mistral",
-        "mixtral",
-        "moonshot",
-        "nemotron",
-        "nova-",
-        "openai",
-        "qianfan",
-        "qwen",
-        "seed-",
-        "solar",
-        "stepfun",
-    ];
-
-    let rest = model_id.strip_prefix("claude-")?;
-    NON_ANTHROPIC_MARKERS
-        .iter()
-        .any(|marker| rest.starts_with(marker))
-        .then(|| rest.to_string())
 }
 
 fn strip_bedrock_model_version_suffix(model_id: &str) -> Option<String> {

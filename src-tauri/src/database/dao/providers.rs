@@ -751,26 +751,26 @@ impl Database {
 #[cfg(test)]
 mod ensure_official_seed_tests {
     use crate::app_config::AppType;
-    use crate::database::{Database, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
+    use crate::database::Database;
 
     #[test]
     fn ensure_inserts_when_missing() {
         let db = Database::memory().expect("memory db");
         let inserted = db
-            .ensure_official_seed_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, AppType::ClaudeDesktop)
+            .ensure_official_seed_by_id("claude-official", AppType::Claude)
             .expect("ensure ok");
         assert!(inserted, "should insert when missing");
 
         let provider = db
             .get_provider_by_id(
-                CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
-                AppType::ClaudeDesktop.as_str(),
+                "claude-official",
+                AppType::Claude.as_str(),
             )
             .expect("query ok")
             .expect("provider exists after ensure");
 
-        assert_eq!(provider.id, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID);
-        assert_eq!(provider.name, "Claude Desktop Official");
+        assert_eq!(provider.id, "claude-official");
+        assert_eq!(provider.name, "Claude Official");
         assert_eq!(provider.category.as_deref(), Some("official"));
         assert_eq!(provider.icon.as_deref(), Some("anthropic"));
         assert_eq!(provider.icon_color.as_deref(), Some("#D4915D"));
@@ -783,24 +783,24 @@ mod ensure_official_seed_tests {
 
         let mut renamed = db
             .get_provider_by_id(
-                CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
-                AppType::ClaudeDesktop.as_str(),
+                "claude-official",
+                AppType::Claude.as_str(),
             )
             .expect("query ok")
             .expect("seed present");
         renamed.name = "My Custom Backup".to_string();
-        db.save_provider(AppType::ClaudeDesktop.as_str(), &renamed)
+        db.save_provider(AppType::Claude.as_str(), &renamed)
             .expect("save customization");
 
         let inserted = db
-            .ensure_official_seed_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, AppType::ClaudeDesktop)
+            .ensure_official_seed_by_id("claude-official", AppType::Claude)
             .expect("ensure ok");
         assert!(!inserted, "should skip when present");
 
         let after = db
             .get_provider_by_id(
-                CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
-                AppType::ClaudeDesktop.as_str(),
+                "claude-official",
+                AppType::Claude.as_str(),
             )
             .expect("query ok")
             .expect("still present");
@@ -813,7 +813,7 @@ mod ensure_official_seed_tests {
     #[test]
     fn ensure_rejects_unknown_seed() {
         let db = Database::memory().expect("memory db");
-        let result = db.ensure_official_seed_by_id("nonexistent-id", AppType::ClaudeDesktop);
+        let result = db.ensure_official_seed_by_id("nonexistent-id", AppType::Claude);
         assert!(result.is_err(), "unknown seed id should be Err");
     }
 
@@ -821,7 +821,7 @@ mod ensure_official_seed_tests {
     fn ensure_rejects_seed_app_type_mismatch() {
         let db = Database::memory().expect("memory db");
         let result =
-            db.ensure_official_seed_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, AppType::Claude);
+            db.ensure_official_seed_by_id("claude-official", AppType::Codex);
         assert!(result.is_err(), "(id, app_type) mismatch should be Err");
     }
 }

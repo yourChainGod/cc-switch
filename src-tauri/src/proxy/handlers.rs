@@ -114,41 +114,6 @@ pub async fn handle_messages(
     handle_messages_for_app(state, request, AppType::Claude, "Claude", "claude", None).await
 }
 
-pub async fn handle_claude_desktop_messages(
-    State(state): State<ProxyState>,
-    request: axum::extract::Request,
-) -> Result<axum::response::Response, ProxyError> {
-    validate_claude_desktop_gateway_auth(&state, request.headers())?;
-    handle_messages_for_app(
-        state,
-        request,
-        AppType::ClaudeDesktop,
-        "Claude Desktop",
-        "claude-desktop",
-        Some("/claude-desktop"),
-    )
-    .await
-}
-
-pub async fn handle_claude_desktop_models(
-    State(state): State<ProxyState>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<Value>, ProxyError> {
-    validate_claude_desktop_gateway_auth(&state, &headers)?;
-    let providers = state
-        .provider_router
-        .select_providers("claude-desktop")
-        .await
-        .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
-    let provider = providers
-        .first()
-        .map(|attempt| &attempt.provider)
-        .ok_or(ProxyError::NoAvailableProvider)?;
-    let response = crate::claude_desktop_config::model_list_response(provider)
-        .map_err(|e| ProxyError::ConfigError(e.to_string()))?;
-    Ok(Json(response))
-}
-
 async fn handle_messages_for_app(
     state: ProxyState,
     request: axum::extract::Request,
@@ -249,33 +214,6 @@ async fn handle_messages_for_app(
         connection_guard,
     )
     .await
-}
-
-fn validate_claude_desktop_gateway_auth(
-    state: &ProxyState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(), ProxyError> {
-    let expected = crate::claude_desktop_config::get_or_create_gateway_token(state.db.as_ref())
-        .map_err(|e| ProxyError::AuthError(e.to_string()))?;
-    let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
-        return Err(ProxyError::AuthError(
-            "Claude Desktop gateway 缺少 Authorization 头".to_string(),
-        ));
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| ProxyError::AuthError("Authorization 头格式无效".to_string()))?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))
-        .unwrap_or("")
-        .trim();
-    if token != expected {
-        return Err(ProxyError::AuthError(
-            "Claude Desktop gateway token 无效".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Claude 格式转换处理（独有逻辑）

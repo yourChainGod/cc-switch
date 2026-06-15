@@ -2,15 +2,8 @@ import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import { providersApi, settingsApi, openclawApi, type AppId } from "@/lib/api";
-import type {
-  Provider,
-  ProviderKey,
-  UsageScript,
-  OpenClawProviderConfig,
-  OpenClawDefaultModel,
-} from "@/types";
-import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
+import { providersApi, settingsApi, type AppId } from "@/lib/api";
+import type { Provider, ProviderKey, UsageScript } from "@/types";
 import {
   injectCodingPlanUsageScript,
   injectOfficialSubscriptionUsageScript,
@@ -23,7 +16,6 @@ import {
   useSwitchProviderMutation,
 } from "@/lib/query";
 import { extractErrorMessage } from "@/utils/errorUtils";
-import { openclawKeys } from "@/hooks/useOpenClaw";
 import {
   extractCodexWireApi,
   isCodexChatWireApi,
@@ -79,9 +71,7 @@ export function useProviderActions(
       provider: Omit<Provider, "id"> & {
         providerKey?: string;
         providerKeys?: string[];
-        suggestedDefaults?: OpenClawSuggestedDefaults;
         addToLive?: boolean;
-        ensureClaudeDesktopOfficialSeed?: boolean;
       },
     ) => {
       // 多 Key 输入：providerKeys 不属于 Provider 本体，先剥离，创建成功后组成 Key 池
@@ -184,52 +174,6 @@ export function useProviderActions(
           }
         })();
       }
-
-      // OpenClaw: register models to allowlist after adding provider
-      if (activeApp === "openclaw" && provider.suggestedDefaults) {
-        const { model, modelCatalog } = provider.suggestedDefaults;
-        let modelsRegistered = false;
-
-        try {
-          // 1. Merge model catalog (allowlist)
-          if (modelCatalog && Object.keys(modelCatalog).length > 0) {
-            const existingCatalog = (await openclawApi.getModelCatalog()) || {};
-            const mergedCatalog = { ...existingCatalog, ...modelCatalog };
-            await openclawApi.setModelCatalog(mergedCatalog);
-            await queryClient.invalidateQueries({
-              queryKey: openclawKeys.health,
-            });
-            modelsRegistered = true;
-          }
-
-          // 2. Set default model (only if not already set)
-          if (model) {
-            const existingDefault = await openclawApi.getDefaultModel();
-            if (!existingDefault?.primary) {
-              await openclawApi.setDefaultModel(model);
-              await queryClient.invalidateQueries({
-                queryKey: openclawKeys.health,
-              });
-            }
-          }
-
-          // Show success toast if models were registered
-          if (modelsRegistered) {
-            toast.success(
-              t("notifications.openclawModelsRegistered", {
-                defaultValue: "模型已注册到 /model 列表",
-              }),
-              { closeButton: true },
-            );
-          }
-        } catch (error) {
-          // Log warning but don't block main flow - provider config is already saved
-          console.warn(
-            "[OpenClaw] Failed to register models to allowlist:",
-            error,
-          );
-        }
-      }
     },
     [addProviderMutation, activeApp, queryClient, t],
   );
@@ -288,13 +232,6 @@ export function useProviderActions(
             defaultValue: "使用 OpenAI Chat 接口格式",
           });
         } else if (
-          activeApp === "claude-desktop" &&
-          provider.meta?.claudeDesktopMode === "proxy"
-        ) {
-          proxyRequiredReason = t("notifications.proxyReasonClaudeDesktop", {
-            defaultValue: "使用 Claude Desktop 本地路由模式",
-          });
-        } else if (
           provider.meta?.isFullUrl &&
           (activeApp === "claude" || activeApp === "codex")
         ) {
@@ -348,16 +285,7 @@ export function useProviderActions(
           if (activeApp === "codex") {
             messageKey = "notifications.codexRestartRequired";
             defaultMessage = "切换成功，请重启客户端以生效";
-          } else if (activeApp === "claude-desktop") {
-            if (provider.meta?.claudeDesktopMode === "proxy") {
-              messageKey = "notifications.claudeDesktopProxyRestartRequired";
-              defaultMessage =
-                "切换成功，请保持 CC Switch 运行，并重启 Claude Desktop 后生效";
-            } else {
-              messageKey = "notifications.claudeDesktopRestartRequired";
-              defaultMessage = "切换成功，重启 Claude Desktop 后生效";
-            }
-          } else if (activeApp === "opencode" || activeApp === "openclaw") {
+          } else if (activeApp === "opencode") {
             messageKey = "notifications.addToConfigSuccess";
             defaultMessage = "已添加到配置";
           }
@@ -429,57 +357,12 @@ export function useProviderActions(
     [activeApp, queryClient, t],
   );
 
-  // Set provider as default model (OpenClaw only)
-  const setAsDefaultModel = useCallback(
-    async (provider: Provider) => {
-      const config = provider.settingsConfig as OpenClawProviderConfig;
-      if (!config.models || config.models.length === 0) {
-        toast.error(
-          t("notifications.openclawNoModels", {
-            defaultValue: "该供应商没有配置模型",
-          }),
-        );
-        return;
-      }
-
-      const model: OpenClawDefaultModel = {
-        primary: `${provider.id}/${config.models[0].id}`,
-        fallbacks: config.models.slice(1).map((m) => `${provider.id}/${m.id}`),
-      };
-
-      try {
-        await openclawApi.setDefaultModel(model);
-        await queryClient.invalidateQueries({
-          queryKey: openclawKeys.defaultModel,
-        });
-        await queryClient.invalidateQueries({
-          queryKey: openclawKeys.health,
-        });
-        toast.success(
-          t("notifications.openclawDefaultModelSet", {
-            defaultValue: "已设为默认模型",
-          }),
-          { closeButton: true },
-        );
-      } catch (error) {
-        const detail =
-          extractErrorMessage(error) ||
-          t("notifications.openclawDefaultModelSetFailed", {
-            defaultValue: "设置默认模型失败",
-          });
-        toast.error(detail);
-      }
-    },
-    [queryClient, t],
-  );
-
   return {
     addProvider,
     updateProvider,
     switchProvider,
     deleteProvider,
     saveUsageScript,
-    setAsDefaultModel,
     isLoading:
       addProviderMutation.isPending ||
       updateProviderMutation.isPending ||

@@ -158,165 +158,154 @@ export function AutoFailoverConfigPanel({
   const isDisabled = disabled || updateConfig.isPending;
 
   return (
-    <div className="border-0 rounded-none shadow-none bg-transparent">
-      <div className="space-y-4">
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{String(error)}</AlertDescription>
-          </Alert>
-        )}
-
-        <Alert className="border-blue-500/40 bg-blue-500/10">
-          <Info className="h-4 w-4" />
-          <AlertDescription className="text-sm">
-            {t(
-              "proxy.autoFailover.info",
-              "每个 Key 都是一条独立通道：请求失败时只冷却出错的 Key（按错误类型指数退避，自动恢复），同一供应商的其他 Key 不受影响，并按队列顺序继续尝试。",
-            )}
-          </AlertDescription>
+    <div className="space-y-3">
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{String(error)}</AlertDescription>
         </Alert>
+      )}
 
-        {/* 重试与超时配置 */}
-        <div className="space-y-4 rounded-lg border border-white/10 bg-muted/30 p-4">
-          <h4 className="text-sm font-semibold">
-            {t("proxy.autoFailover.retrySettings", "重试与超时设置")}
-          </h4>
+      <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+        <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+        <span>
+          {t(
+            "proxy.autoFailover.info",
+            "每个 Key 都是一条独立通道：请求失败时只冷却出错的 Key（按错误类型指数退避，自动恢复），同一供应商的其他 Key 不受影响，并按队列顺序继续尝试。",
+          )}
+        </span>
+      </p>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor={`maxRetries-${appType}`}>
-                {t("proxy.autoFailover.maxRetries", "最大重试次数")}
-              </Label>
-              <Input
-                id={`maxRetries-${appType}`}
-                type="number"
-                min="0"
-                max="10"
-                value={formData.maxRetries}
-                onChange={(e) =>
-                  setFormData({ ...formData, maxRetries: e.target.value })
-                }
-                disabled={isDisabled}
-              />
-              <p className="text-xs text-muted-foreground">
-                {t(
-                  "proxy.autoFailover.maxRetriesHint",
-                  "请求失败时的重试次数（0-10）",
-                )}
-              </p>
-            </div>
+      {/* 重试与超时设置（合并为单块四字段） */}
+      <div className="space-y-3 rounded-lg border border-border/60 bg-muted/30 p-3">
+        <h4 className="text-sm font-semibold">
+          {t("proxy.autoFailover.retrySettings", "重试与超时设置")}
+        </h4>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor={`maxRetries-${appType}`}>
+              {t("proxy.autoFailover.maxRetries", "最大重试次数")}
+            </Label>
+            <Input
+              id={`maxRetries-${appType}`}
+              type="number"
+              min="0"
+              max="10"
+              value={formData.maxRetries}
+              onChange={(e) =>
+                setFormData({ ...formData, maxRetries: e.target.value })
+              }
+              disabled={isDisabled}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "proxy.autoFailover.maxRetriesHint",
+                "请求失败时的重试次数（0-10）",
+              )}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor={`streamingFirstByte-${appType}`}>
+              {t(
+                "proxy.autoFailover.streamingFirstByte",
+                "流式首字节超时（秒）",
+              )}
+            </Label>
+            <Input
+              id={`streamingFirstByte-${appType}`}
+              type="number"
+              min="1"
+              max="120"
+              value={formData.streamingFirstByteTimeout}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  streamingFirstByteTimeout: e.target.value,
+                })
+              }
+              disabled={isDisabled}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "proxy.autoFailover.streamingFirstByteHint",
+                "等待首个数据块的最大时间，范围 1-120 秒，默认 60 秒",
+              )}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor={`streamingIdle-${appType}`}>
+              {t("proxy.autoFailover.streamingIdle", "流式静默超时（秒）")}
+            </Label>
+            <Input
+              id={`streamingIdle-${appType}`}
+              type="number"
+              min="0"
+              max="600"
+              value={formData.streamingIdleTimeout}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  streamingIdleTimeout: e.target.value,
+                })
+              }
+              disabled={isDisabled}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "proxy.autoFailover.streamingIdleHint",
+                "数据块之间的最大间隔，范围 60-600 秒，填 0 禁用（防止中途卡住）",
+              )}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor={`nonStreaming-${appType}`}>
+              {t("proxy.autoFailover.nonStreaming", "非流式超时（秒）")}
+            </Label>
+            <Input
+              id={`nonStreaming-${appType}`}
+              type="number"
+              min="60"
+              max="1200"
+              value={formData.nonStreamingTimeout}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  nonStreamingTimeout: e.target.value,
+                })
+              }
+              disabled={isDisabled}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "proxy.autoFailover.nonStreamingHint",
+                "非流式请求的总超时时间，范围 60-1200 秒，默认 600 秒（10 分钟）",
+              )}
+            </p>
           </div>
         </div>
+      </div>
 
-        {/* 超时配置 */}
-        <div className="space-y-4 rounded-lg border border-white/10 bg-muted/30 p-4">
-          <h4 className="text-sm font-semibold">
-            {t("proxy.autoFailover.timeoutSettings", "超时配置")}
-          </h4>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor={`streamingFirstByte-${appType}`}>
-                {t(
-                  "proxy.autoFailover.streamingFirstByte",
-                  "流式首字节超时（秒）",
-                )}
-              </Label>
-              <Input
-                id={`streamingFirstByte-${appType}`}
-                type="number"
-                min="1"
-                max="120"
-                value={formData.streamingFirstByteTimeout}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    streamingFirstByteTimeout: e.target.value,
-                  })
-                }
-                disabled={isDisabled}
-              />
-              <p className="text-xs text-muted-foreground">
-                {t(
-                  "proxy.autoFailover.streamingFirstByteHint",
-                  "等待首个数据块的最大时间，范围 1-120 秒，默认 60 秒",
-                )}
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor={`streamingIdle-${appType}`}>
-                {t("proxy.autoFailover.streamingIdle", "流式静默超时（秒）")}
-              </Label>
-              <Input
-                id={`streamingIdle-${appType}`}
-                type="number"
-                min="0"
-                max="600"
-                value={formData.streamingIdleTimeout}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    streamingIdleTimeout: e.target.value,
-                  })
-                }
-                disabled={isDisabled}
-              />
-              <p className="text-xs text-muted-foreground">
-                {t(
-                  "proxy.autoFailover.streamingIdleHint",
-                  "数据块之间的最大间隔，范围 60-600 秒，填 0 禁用（防止中途卡住）",
-                )}
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor={`nonStreaming-${appType}`}>
-                {t("proxy.autoFailover.nonStreaming", "非流式超时（秒）")}
-              </Label>
-              <Input
-                id={`nonStreaming-${appType}`}
-                type="number"
-                min="60"
-                max="1200"
-                value={formData.nonStreamingTimeout}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    nonStreamingTimeout: e.target.value,
-                  })
-                }
-                disabled={isDisabled}
-              />
-              <p className="text-xs text-muted-foreground">
-                {t(
-                  "proxy.autoFailover.nonStreamingHint",
-                  "非流式请求的总超时时间，范围 60-1200 秒，默认 600 秒（10 分钟）",
-                )}
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* 操作按钮 */}
-        <div className="flex justify-end gap-3 pt-2">
-          <Button variant="outline" onClick={handleReset} disabled={isDisabled}>
-            {t("common.reset", "重置")}
-          </Button>
-          <Button onClick={handleSave} disabled={isDisabled}>
-            {updateConfig.isPending ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                {t("common.saving", "保存中...")}
-              </>
-            ) : (
-              <>
-                <Save className="mr-2 h-4 w-4" />
-                {t("common.save", "保存")}
-              </>
-            )}
-          </Button>
-        </div>
+      {/* 操作按钮 */}
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" onClick={handleReset} disabled={isDisabled}>
+          {t("common.reset", "重置")}
+        </Button>
+        <Button onClick={handleSave} disabled={isDisabled}>
+          {updateConfig.isPending ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              {t("common.saving", "保存中...")}
+            </>
+          ) : (
+            <>
+              <Save className="mr-2 h-4 w-4" />
+              {t("common.save", "保存")}
+            </>
+          )}
+        </Button>
       </div>
     </div>
   );

@@ -17,10 +17,8 @@ import { UniversalProviderPanel } from "@/components/universal";
 import { providerPresets } from "@/config/claudeProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import { geminiProviderPresets } from "@/config/geminiProviderPresets";
-import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
 import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
 import { isAdditiveApp } from "@/config/additiveApps";
-import type { OpenClawSuggestedDefaults } from "@/config/openclawProviderPresets";
 import type { UniversalProviderPreset } from "@/config/universalProviderPresets";
 
 interface AddProviderDialogProps {
@@ -31,8 +29,6 @@ interface AddProviderDialogProps {
     provider: Omit<Provider, "id"> & {
       providerKey?: string;
       providerKeys?: string[];
-      suggestedDefaults?: OpenClawSuggestedDefaults;
-      ensureClaudeDesktopOfficialSeed?: boolean;
     },
   ) => Promise<void> | void;
 }
@@ -44,12 +40,8 @@ export function AddProviderDialog({
   onSubmit,
 }: AddProviderDialogProps) {
   const { t } = useTranslation();
-  // OpenCode and OpenClaw don't support universal providers
-  const showUniversalTab =
-    appId !== "opencode" &&
-    appId !== "openclaw" &&
-    appId !== "hermes" &&
-    appId !== "claude-desktop";
+  // OpenCode doesn't support universal providers
+  const showUniversalTab = appId !== "opencode";
   const [activeTab, setActiveTab] = useState<"app-specific" | "universal">(
     "app-specific",
   );
@@ -101,8 +93,6 @@ export function AddProviderDialog({
       const providerData: Omit<Provider, "id"> & {
         providerKey?: string;
         providerKeys?: string[];
-        suggestedDefaults?: OpenClawSuggestedDefaults;
-        ensureClaudeDesktopOfficialSeed?: boolean;
       } = {
         name: values.name.trim(),
         notes: values.notes?.trim() || undefined,
@@ -119,17 +109,7 @@ export function AddProviderDialog({
         providerData.providerKeys = values.providerKeys;
       }
 
-      if (appId === "claude-desktop" && values.presetId) {
-        const presetIndex = parseInt(
-          values.presetId.replace("claude-desktop-", ""),
-        );
-        const preset = claudeDesktopProviderPresets[presetIndex];
-        providerData.ensureClaudeDesktopOfficialSeed =
-          values.presetCategory === "official" &&
-          preset?.category === "official";
-      }
-
-      // providerKey 型应用（OpenCode/OpenClaw/Hermes）：传递 providerKey 用于生成主键 ID
+      // providerKey 型应用（OpenCode）：传递 providerKey 用于生成主键 ID
       if (isAdditiveApp(appId) && values.providerKey) {
         providerData.providerKey = values.providerKey;
       }
@@ -192,31 +172,10 @@ export function AddProviderDialog({
                 preset.endpointCandidates.forEach(addUrl);
               }
             }
-          } else if (appId === "claude-desktop") {
-            const presets = claudeDesktopProviderPresets;
-            const presetIndex = parseInt(
-              values.presetId.replace("claude-desktop-", ""),
-            );
-            if (
-              !isNaN(presetIndex) &&
-              presetIndex >= 0 &&
-              presetIndex < presets.length
-            ) {
-              const preset = presets[presetIndex];
-              if (Array.isArray(preset.endpointCandidates)) {
-                preset.endpointCandidates.forEach(addUrl);
-              }
-              addUrl(preset.baseUrl);
-            }
           }
         }
 
         if (appId === "claude") {
-          const env = parsedConfig.env as Record<string, any> | undefined;
-          if (env?.ANTHROPIC_BASE_URL) {
-            addUrl(env.ANTHROPIC_BASE_URL);
-          }
-        } else if (appId === "claude-desktop") {
           const env = parsedConfig.env as Record<string, any> | undefined;
           if (env?.ANTHROPIC_BASE_URL) {
             addUrl(env.ANTHROPIC_BASE_URL);
@@ -241,15 +200,6 @@ export function AddProviderDialog({
           if (options?.baseURL) {
             addUrl(options.baseURL);
           }
-        } else if (appId === "openclaw") {
-          // OpenClaw uses baseUrl directly
-          if (parsedConfig.baseUrl) {
-            addUrl(parsedConfig.baseUrl as string);
-          }
-        } else if (appId === "hermes") {
-          if (parsedConfig.base_url) {
-            addUrl(parsedConfig.base_url as string);
-          }
         }
 
         const urls = Array.from(urlSet);
@@ -269,11 +219,6 @@ export function AddProviderDialog({
             custom_endpoints: customEndpoints,
           };
         }
-      }
-
-      // OpenClaw: pass suggestedDefaults for model registration
-      if (appId === "openclaw" && values.suggestedDefaults) {
-        providerData.suggestedDefaults = values.suggestedDefaults;
       }
 
       await onSubmit(providerData);
@@ -358,7 +303,7 @@ export function AddProviderDialog({
           </TabsContent>
         </Tabs>
       ) : (
-        // OpenCode/OpenClaw: directly show form without tabs
+        // OpenCode: directly show form without tabs
         <ProviderForm
           appId={appId}
           submitLabel={t("common.add")}

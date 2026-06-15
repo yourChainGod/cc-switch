@@ -9,8 +9,6 @@ import type { AppId } from "@/lib/api/types";
  */
 export const ADDITIVE_APP_IDS = [
   "opencode",
-  "openclaw",
-  "hermes",
 ] as const satisfies readonly AppId[];
 
 export type AdditiveAppId = (typeof ADDITIVE_APP_IDS)[number];

@@ -84,7 +84,7 @@ impl ModelRoutingConfig {
     }
 }
 
-/// 取指定客户端的规则桶；未知 app_key（如 claude-desktop / opencode）返回空切片，
+/// 取指定客户端的规则桶；未知 app_key 返回空切片，
 /// 从而永不命中、行为不变。
 pub fn rules_for<'a>(cfg: &'a ModelRoutingConfig, app_key: &str) -> &'a [ModelRoutingRule] {
     match app_key {
@@ -225,7 +225,7 @@ mod tests {
         assert!(cfg.is_empty());
         assert!(resolve(rules_for(&cfg, "codex"), "gpt-5.4-mini").is_none());
         // 未知客户端取空桶
-        assert!(rules_for(&cfg, "claude-desktop").is_empty());
+        assert!(rules_for(&cfg, "unknown-app").is_empty());
     }
 
     #[test]

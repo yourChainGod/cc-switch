@@ -14,7 +14,6 @@ import { ProviderIcon } from "@/components/ProviderIcon";
 import UsageFooter from "@/components/UsageFooter";
 import SubscriptionQuotaFooter from "@/components/SubscriptionQuotaFooter";
 import { TEMPLATE_TYPES } from "@/config/constants";
-import { isHermesReadOnlyProvider } from "@/config/hermesProviderPresets";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
 import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBadge";
 import {
@@ -60,9 +59,6 @@ interface ProviderCardProps {
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   keySummary?: ProviderKeySummary;
-  // OpenClaw: default model
-  isDefaultModel?: boolean;
-  onSetAsDefault?: () => void;
 }
 
 /** 判断是否为官方供应商（无自定义 base URL / API key，直连官方 API） */
@@ -159,9 +155,6 @@ function ProviderCardImpl({
   onToggleFailover,
   activeProviderId,
   keySummary,
-  // OpenClaw: default model
-  isDefaultModel,
-  onSetAsDefault,
 }: ProviderCardProps) {
   const { t } = useTranslation();
 
@@ -213,10 +206,6 @@ function ProviderCardImpl({
   // 真官方就该有显式 category；手动新建官方应引导标注，而不是靠空字段猜。
   const isOfficialBlockedByProxy =
     isProxyTakeover && provider.category === "official";
-  // Hermes v12+ overlay entries live under the `providers:` dict and are
-  // read-only here — writes have to go through Hermes Web UI.
-  const isHermesReadOnly =
-    appId === "hermes" && isHermesReadOnlyProvider(provider.settingsConfig);
   const codexNeedsRouting = useMemo(() => {
     if (appId !== "codex" || provider.category === "official") return false;
     if (provider.meta?.apiFormat === "openai_chat") return true;
@@ -235,7 +224,7 @@ function ProviderCardImpl({
     appId === "claude" && provider.category === "third_party";
 
   // 获取用量数据以判断是否有多套餐
-  // 累加模式应用（OpenCode/OpenClaw/Hermes）：使用 isInConfig 代替 isCurrent
+  // 累加模式应用（OpenCode）：使用 isInConfig 代替 isCurrent
   const shouldAutoQuery = isAdditiveApp(appId) ? isInConfig : isCurrent;
   const autoQueryInterval = shouldAutoQuery
     ? provider.meta?.usage_script?.autoQueryInterval || 0
@@ -272,19 +261,16 @@ function ProviderCardImpl({
 
   // 判断是否是"当前使用中"的供应商
   // - OMO/OMO Slim 供应商：使用 isCurrent
-  // - OpenClaw：使用默认模型归属的 provider 作为当前项（蓝色边框）
   // - OpenCode（非 OMO）：不存在"当前"概念，返回 false
   // - 故障转移模式：代理实际使用的供应商（activeProviderId）
   // - 普通模式：isCurrent
   const isActiveProvider = isAnyOmo
     ? isCurrent
-    : appId === "openclaw"
-      ? Boolean(isDefaultModel)
-      : appId === "opencode"
-        ? false
-        : isAutoFailoverEnabled
-          ? activeProviderId === provider.id
-          : isCurrent;
+    : appId === "opencode"
+      ? false
+      : isAutoFailoverEnabled
+        ? activeProviderId === provider.id
+        : isCurrent;
 
   const shouldUseGreen = !isAnyOmo && isProxyTakeover && isActiveProvider;
   const hasPersistentConfigHighlight = isAdditiveMode && isInConfig;
@@ -295,8 +281,7 @@ function ProviderCardImpl({
       (isActiveProvider || hasPersistentConfigHighlight));
   const isFailoverQueueEffective =
     isInFailoverQueue && isProxyRunning && isAutoFailoverEnabled;
-  const isFailoverUnsupportedAdditiveApp =
-    isAdditiveMode || appId === "openclaw" || appId === "hermes";
+  const isFailoverUnsupportedAdditiveApp = isAdditiveMode;
   const canUseFailoverQueue =
     !isFailoverUnsupportedAdditiveApp && !isAnyOmo && !!onToggleFailover;
   const failoverActionLabel = isInFailoverQueue
@@ -377,16 +362,6 @@ function ProviderCardImpl({
                   Slim
                 </span>
               )}
-
-              {appId === "claude-desktop" &&
-                provider.category !== "official" &&
-                provider.meta?.claudeDesktopMode === "proxy" && (
-                  <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                    {t("claudeDesktop.modeProxy", {
-                      defaultValue: "需要路由",
-                    })}
-                  </span>
-                )}
 
               {appId === "claude" &&
                 provider.category !== "official" &&
@@ -494,19 +469,6 @@ function ProviderCardImpl({
                         available: keySummary.available,
                         defaultValue: "Key {{available}}/{{total}}",
                       })}
-                </span>
-              )}
-
-              {isHermesReadOnly && (
-                <span
-                  className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200"
-                  title={t("provider.managedByHermesHint", {
-                    defaultValue: "由 Hermes 管理，请在 Hermes Web UI 中编辑",
-                  })}
-                >
-                  {t("provider.managedByHermes", {
-                    defaultValue: "Hermes Managed",
-                  })}
                 </span>
               )}
             </div>
@@ -620,7 +582,6 @@ function ProviderCardImpl({
               isTesting={isTesting}
               isProxyTakeover={isProxyTakeover}
               isOfficialBlockedByProxy={isOfficialBlockedByProxy}
-              isReadOnly={isHermesReadOnly}
               isOmo={isAnyOmo}
               onSwitch={() => onSwitch(provider)}
               onEdit={() => onEdit(provider)}
@@ -642,9 +603,6 @@ function ProviderCardImpl({
               }
               isAutoFailoverEnabled={isAutoFailoverEnabled}
               isInFailoverQueue={isInFailoverQueue}
-              // OpenClaw: default model
-              isDefaultModel={isDefaultModel}
-              onSetAsDefault={onSetAsDefault}
             />
           </div>
         </div>

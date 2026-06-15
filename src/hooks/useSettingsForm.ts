@@ -113,7 +113,7 @@ export function useSettingsForm(): UseSettingsFormResult {
       skipClaudeOnboarding: data.skipClaudeOnboarding ?? false,
       preserveCodexOfficialAuthOnSwitch:
         data.preserveCodexOfficialAuthOnSwitch ?? false,
-      // 表驱动：所有应用目录字段统一 trim/sanitize（含 hermesConfigDir）
+      // 表驱动：所有应用目录字段统一 trim/sanitize
       ...sanitizeDirectorySettingsFields(data),
       language: normalizedLanguage,
     };
@@ -174,7 +174,7 @@ export function useSettingsForm(): UseSettingsFormResult {
         skipClaudeOnboarding: serverData.skipClaudeOnboarding ?? false,
         preserveCodexOfficialAuthOnSwitch:
           serverData.preserveCodexOfficialAuthOnSwitch ?? false,
-        // 表驱动：所有应用目录字段统一 trim/sanitize（含 hermesConfigDir）
+        // 表驱动：所有应用目录字段统一 trim/sanitize
         ...sanitizeDirectorySettingsFields(serverData),
         language: normalizedLanguage,
       };

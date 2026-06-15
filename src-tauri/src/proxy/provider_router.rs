@@ -967,8 +967,6 @@ mod tests {
         let cases = [
             ("codex", "/auth/OPENAI_API_KEY", None),
             ("gemini", "/env/GEMINI_API_KEY", None),
-            ("openclaw", "/apiKey", None),
-            ("hermes", "/api_key", None),
             ("opencode", "/options/apiKey", None),
             ("claude", "/auth/customToken", Some("auth.customToken")),
         ];

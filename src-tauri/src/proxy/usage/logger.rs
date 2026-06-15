@@ -213,13 +213,8 @@ impl<'a> UsageLogger<'a> {
         provider_id: &str,
         app_type: &str,
     ) -> (Decimal, String) {
-        let default_app_type = if app_type == "claude-desktop" {
-            "claude"
-        } else {
-            app_type
-        };
         let default_multiplier_raw =
-            match self.db.get_default_cost_multiplier(default_app_type).await {
+            match self.db.get_default_cost_multiplier(app_type).await {
                 Ok(value) => value,
                 Err(e) => {
                     log::warn!("[USG-003] 获取默认倍率失败 (app_type={app_type}): {e}");
@@ -237,7 +232,7 @@ impl<'a> UsageLogger<'a> {
         };
 
         let default_pricing_source_raw =
-            match self.db.get_pricing_model_source(default_app_type).await {
+            match self.db.get_pricing_model_source(app_type).await {
                 Ok(value) => value,
                 Err(e) => {
                     log::warn!("[USG-003] 获取默认计费模式失败 (app_type={app_type}): {e}");

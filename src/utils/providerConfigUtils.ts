@@ -1498,7 +1498,7 @@ export function getProviderBaseUrl(
     if (!config) return undefined;
 
     let baseUrl: string | undefined;
-    if (appId === "claude" || appId === "claude-desktop") {
+    if (appId === "claude") {
       baseUrl = config.env?.ANTHROPIC_BASE_URL;
     } else if (appId === "codex") {
       baseUrl = extractCodexBaseUrl(
@@ -1506,10 +1506,6 @@ export function getProviderBaseUrl(
       );
     } else if (appId === "gemini") {
       baseUrl = config.env?.GOOGLE_GEMINI_BASE_URL;
-    } else if (appId === "hermes") {
-      baseUrl = config.base_url;
-    } else if (appId === "openclaw") {
-      baseUrl = config.baseUrl;
     } else if (appId === "opencode") {
       baseUrl = config.options?.baseURL;
     }

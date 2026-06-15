@@ -214,7 +214,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         if (!config) return undefined;
 
         // 处理不同应用的配置格式（apiKey fallback 对齐后端 resolver）
-        if (appId === "claude" || appId === "claude-desktop") {
+        if (appId === "claude") {
           const env = (config as any).env || {};
           return (
             env.ANTHROPIC_AUTH_TOKEN ||
@@ -232,10 +232,6 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         } else if (appId === "gemini") {
           const env = (config as any).env || {};
           return env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
-        } else if (appId === "hermes") {
-          return (config as any).api_key;
-        } else if (appId === "openclaw") {
-          return (config as any).apiKey;
         } else if (appId === "opencode") {
           return ((config as any).options || {}).apiKey;
         }

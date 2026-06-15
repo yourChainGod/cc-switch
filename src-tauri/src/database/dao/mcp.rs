@@ -31,7 +31,6 @@ impl Database {
                 let enabled_codex: bool = row.get(8)?;
                 let enabled_gemini: bool = row.get(9)?;
                 let enabled_opencode: bool = row.get(10)?;
-                let enabled_hermes: bool = row.get(11)?;
 
                 let server = serde_json::from_str(&server_config_str).unwrap_or_default();
                 let tags = serde_json::from_str(&tags_str).unwrap_or_default();
@@ -47,7 +46,6 @@ impl Database {
                             codex: enabled_codex,
                             gemini: enabled_gemini,
                             opencode: enabled_opencode,
-                            hermes: enabled_hermes,
                         },
                         description,
                         homepage,
@@ -89,7 +87,7 @@ impl Database {
                 server.apps.codex,
                 server.apps.gemini,
                 server.apps.opencode,
-                server.apps.hermes,
+                false,
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;

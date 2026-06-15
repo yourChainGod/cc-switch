@@ -47,14 +47,7 @@ interface ToolVersion {
   wsl_distro: string | null;
 }
 
-const TOOL_NAMES = [
-  "claude",
-  "codex",
-  "gemini",
-  "opencode",
-  "openclaw",
-  "hermes",
-] as const;
+const TOOL_NAMES = ["claude", "codex", "gemini", "opencode"] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 type ToolLifecycleAction = "install" | "update";
 
@@ -96,22 +89,6 @@ const ENV_BADGE_CONFIG: Record<
 const posixScriptInstallCommand = (url: string) =>
   `bash -c 'tmp=$(mktemp) && curl -fsSL ${url} -o $tmp && bash $tmp; status=$?; rm -f $tmp; exit $status'`;
 
-const HERMES_WINDOWS_INSTALL_SCRIPT =
-  "irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex";
-
-const powershellEncodedCommand = (script: string): string => {
-  let binary = "";
-  for (let i = 0; i < script.length; i += 1) {
-    const code = script.charCodeAt(i);
-    binary += String.fromCharCode(code & 0xff, code >> 8);
-  }
-  return btoa(binary);
-};
-
-const HERMES_WINDOWS_INSTALL_COMMAND = `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${powershellEncodedCommand(
-  HERMES_WINDOWS_INSTALL_SCRIPT,
-)}`;
-
 const POSIX_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
 ${posixScriptInstallCommand("https://claude.ai/install.sh")} || npm i -g @anthropic-ai/claude-code@latest
 # Codex
@@ -119,11 +96,7 @@ npm i -g @openai/codex@latest
 # Gemini CLI
 npm i -g @google/gemini-cli@latest
 # OpenCode
-${posixScriptInstallCommand("https://opencode.ai/install")} || npm i -g opencode-ai@latest
-# OpenClaw
-npm i -g openclaw@latest
-# Hermes
-${posixScriptInstallCommand("https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh")}`;
+${posixScriptInstallCommand("https://opencode.ai/install")} || npm i -g opencode-ai@latest`;
 
 const WINDOWS_ONE_CLICK_INSTALL_COMMANDS = `# Claude Code
 npm i -g @anthropic-ai/claude-code@latest
@@ -132,11 +105,7 @@ npm i -g @openai/codex@latest
 # Gemini CLI
 npm i -g @google/gemini-cli@latest
 # OpenCode
-npm i -g opencode-ai@latest
-# OpenClaw
-npm i -g openclaw@latest
-# Hermes
-${HERMES_WINDOWS_INSTALL_COMMAND}`;
+npm i -g opencode-ai@latest`;
 
 const ONE_CLICK_INSTALL_COMMANDS = isWindows()
   ? WINDOWS_ONE_CLICK_INSTALL_COMMANDS
@@ -147,8 +116,6 @@ const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
   codex: "Codex",
   gemini: "Gemini CLI",
   opencode: "OpenCode",
-  openclaw: "OpenClaw",
-  hermes: "Hermes",
 };
 
 // 后端返回的 tool 是 string；这里收敛唯一的 ToolName 断言与兜底，供升级确认
@@ -162,8 +129,6 @@ const TOOL_APP_IDS: Record<ToolName, AppId> = {
   codex: "codex",
   gemini: "gemini",
   opencode: "opencode",
-  openclaw: "openclaw",
-  hermes: "hermes",
 };
 
 export function AboutSection() {
@@ -444,7 +409,7 @@ export function AboutSection() {
             }
           } else {
             // 命令退出码为 0、但刷新后仍探不到版本：多半是"装上了却跑不起来"
-            // （如 openclaw 要求更高的 Node 版本）。refreshToolVersions 的 merge 已把
+            // （如工具要求更高的 Node 版本）。refreshToolVersions 的 merge 已把
             // version 置空并写入后端 error，这里只需归类为软失败并展示原因。
             const detail = tool?.error?.trim() || t("settings.toolNotRunnable");
             failures.push({

@@ -1,7 +1,6 @@
 mod app_config;
 mod app_store;
 mod auto_launch;
-mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
@@ -13,13 +12,11 @@ mod deeplink;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
-pub mod hermes_config;
 mod init_status;
 mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
 mod mcp;
-mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
 mod prompt;
@@ -636,9 +633,9 @@ pub fn run() {
                 log::info!("✓ First-run welcome notice pending");
             }
 
-            // 1.6. 自动同步 OpenCode / OpenClaw 的 live providers 到数据库
+            // 1.6. 自动同步 OpenCode 的 live providers 到数据库
             //
-            // additive 模式（OpenCode / OpenClaw）的 import 函数本身按 id 幂等，
+            // additive 模式（OpenCode）的 import 函数本身按 id 幂等，
             // 已有的 provider 会被跳过，所以每次启动都跑是安全的——既保证新装
             // 用户开箱可见 live 中的供应商，也让外部修改的 live 文件能在重启
             // 后同步到数据库（与之前依赖前端"导入当前配置"按钮手动触发不同）。
@@ -651,20 +648,6 @@ pub fn run() {
                 }
                 Ok(_) => log::debug!("○ No new OpenCode providers to import"),
                 Err(e) => log::warn!("✗ Failed to import OpenCode providers: {e}"),
-            }
-            match crate::services::provider::import_openclaw_providers_from_live(&app_state) {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Imported {count} OpenClaw provider(s) from live config");
-                }
-                Ok(_) => log::debug!("○ No new OpenClaw providers to import"),
-                Err(e) => log::warn!("✗ Failed to import OpenClaw providers: {e}"),
-            }
-            match crate::services::provider::import_hermes_providers_from_live(&app_state) {
-                Ok(count) if count > 0 => {
-                    log::info!("✓ Imported {count} Hermes provider(s) from live config");
-                }
-                Ok(_) => log::debug!("○ No new Hermes providers to import"),
-                Err(e) => log::warn!("✗ Failed to import Hermes providers: {e}"),
             }
 
             // 2. OMO 配置导入（当数据库中无 OMO provider 时，从本地文件导入）
@@ -753,14 +736,6 @@ pub fn run() {
                     Ok(_) => log::debug!("○ No OpenCode MCP servers found to import"),
                     Err(e) => log::warn!("✗ Failed to import OpenCode MCP: {e}"),
                 }
-
-                match crate::services::mcp::McpService::import_from_hermes(&app_state) {
-                    Ok(count) if count > 0 => {
-                        log::info!("✓ Imported {count} MCP server(s) from Hermes");
-                    }
-                    Ok(_) => log::debug!("○ No Hermes MCP servers found to import"),
-                    Err(e) => log::warn!("✗ Failed to import Hermes MCP: {e}"),
-                }
             }
 
             // 4. 导入提示词文件（表空时触发）
@@ -772,8 +747,6 @@ pub fn run() {
                     crate::app_config::AppType::Codex,
                     crate::app_config::AppType::Gemini,
                     crate::app_config::AppType::OpenCode,
-                    crate::app_config::AppType::OpenClaw,
-                    crate::app_config::AppType::Hermes,
                 ] {
                     match crate::services::prompt::PromptService::import_from_file_on_first_launch(
                         &app_state,
@@ -1144,10 +1117,6 @@ pub fn run() {
             commands::remove_provider_from_live_config,
             commands::switch_provider,
             commands::import_default_config,
-            commands::get_claude_desktop_status,
-            commands::get_claude_desktop_default_routes,
-            commands::import_claude_desktop_providers_from_claude,
-            commands::ensure_claude_desktop_official_provider,
             commands::get_claude_config_status,
             commands::get_config_status,
             commands::get_claude_code_config_path,
@@ -1367,32 +1336,6 @@ pub fn run() {
             // OpenCode specific
             commands::import_opencode_providers_from_live,
             commands::get_opencode_live_provider_ids,
-            // OpenClaw specific
-            commands::import_openclaw_providers_from_live,
-            commands::get_openclaw_live_provider_ids,
-            commands::get_openclaw_live_provider,
-            commands::scan_openclaw_config_health,
-            commands::get_openclaw_default_model,
-            commands::set_openclaw_default_model,
-            commands::get_openclaw_model_catalog,
-            commands::set_openclaw_model_catalog,
-            commands::get_openclaw_agents_defaults,
-            commands::set_openclaw_agents_defaults,
-            commands::get_openclaw_env,
-            commands::set_openclaw_env,
-            commands::get_openclaw_tools,
-            commands::set_openclaw_tools,
-            // Hermes specific
-            commands::import_hermes_providers_from_live,
-            commands::get_hermes_live_provider_ids,
-            commands::get_hermes_live_provider,
-            commands::get_hermes_model_config,
-            commands::open_hermes_web_ui,
-            commands::launch_hermes_dashboard,
-            commands::get_hermes_memory,
-            commands::set_hermes_memory,
-            commands::get_hermes_memory_limits,
-            commands::set_hermes_memory_enabled,
             // Global upstream proxy
             commands::get_global_proxy_url,
             commands::set_global_proxy_url,
@@ -1408,16 +1351,6 @@ pub fn run() {
             commands::read_omo_slim_local_file,
             commands::get_current_omo_slim_provider_id,
             commands::disable_current_omo_slim,
-            // Workspace files (OpenClaw)
-            commands::read_workspace_file,
-            commands::write_workspace_file,
-            // Daily memory files (OpenClaw workspace)
-            commands::list_daily_memory_files,
-            commands::read_daily_memory_file,
-            commands::write_daily_memory_file,
-            commands::delete_daily_memory_file,
-            commands::search_daily_memory_files,
-            commands::open_workspace_directory,
             // lightweight mode (for testing or low-resource environments)
             commands::enter_lightweight_mode,
             commands::exit_lightweight_mode,

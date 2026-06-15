@@ -122,9 +122,9 @@ export function FailoverQueueManager({
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {/* 自动故障转移开关 */}
-      <div className="flex items-center justify-between p-4 rounded-lg bg-muted/50 border border-border/50">
+      <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border border-border/50">
         <div className="space-y-0.5">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium">
@@ -153,15 +153,15 @@ export function FailoverQueueManager({
       </div>
 
       {/* 说明信息 */}
-      <Alert className="border-blue-500/40 bg-blue-500/10">
-        <Info className="h-4 w-4" />
-        <AlertDescription className="text-sm">
+      <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+        <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+        <span>
           {t(
             "proxy.failoverQueue.info",
             "队列顺序与首页供应商列表顺序一致。当请求失败时，系统会按顺序依次尝试队列中的供应商。",
           )}
-        </AlertDescription>
-      </Alert>
+        </span>
+      </p>
 
       {/* 添加供应商 */}
       <div className="flex items-center gap-2">
@@ -215,12 +215,9 @@ export function FailoverQueueManager({
 
       {/* 队列列表 */}
       {!queue || queue.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-emerald-500/40 bg-emerald-500/5 p-6 text-center">
+        <div className="rounded-lg border border-dashed border-emerald-500/40 bg-emerald-500/5 p-4 text-center">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
-            {t(
-              "proxy.failoverQueue.smartDefaultTitle",
-              "智能默认已生效",
-            )}
+            {t("proxy.failoverQueue.smartDefaultTitle", "智能默认已生效")}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             {t(

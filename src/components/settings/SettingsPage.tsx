@@ -266,6 +266,10 @@ export function SettingsPage({
                           handleAutoSave({ preferredTerminal: terminal })
                         }
                       />
+                      <CodexAuthSettings
+                        settings={settings}
+                        onChange={handleAutoSave}
+                      />
                     </div>
 
                     {/* 高级设置 */}
@@ -276,10 +280,6 @@ export function SettingsPage({
                         })}
                       </h3>
                       <WindowSettings
-                        settings={settings}
-                        onChange={handleAutoSave}
-                      />
-                      <CodexAuthSettings
                         settings={settings}
                         onChange={handleAutoSave}
                       />

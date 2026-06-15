@@ -2,13 +2,12 @@ import type { AppId } from "@/lib/api";
 import type { VisibleApps } from "@/types";
 import { ProviderIcon } from "@/components/ProviderIcon";
 import { cn } from "@/lib/utils";
-import { Monitor, Terminal } from "lucide-react";
+import { Terminal } from "lucide-react";
 
 const APP_BADGE_ICON: Partial<
   Record<AppId, { icon: typeof Terminal; offsetY?: number }>
 > = {
   claude: { icon: Terminal },
-  "claude-desktop": { icon: Monitor, offsetY: 0.5 },
 };
 
 interface AppSwitcherProps {
@@ -35,21 +34,15 @@ export function AppSwitcher({
   const iconSize = 20;
   const appIconName: Record<AppId, string> = {
     claude: "claude",
-    "claude-desktop": "claude",
     codex: "openai",
     gemini: "gemini",
     opencode: "opencode",
-    openclaw: "openclaw",
-    hermes: "hermes",
   };
   const appDisplayName: Record<AppId, string> = {
     claude: "Claude Code",
-    "claude-desktop": "Claude Desktop",
     codex: "Codex",
     gemini: "Gemini",
     opencode: "OpenCode",
-    openclaw: "OpenClaw",
-    hermes: "Hermes",
   };
 
   // Filter apps based on visibility settings (default all visible)

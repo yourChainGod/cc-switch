@@ -25,8 +25,7 @@ use crate::store::AppState;
 
 // Re-export sub-module functions for external access
 pub use live::{
-    import_default_config, import_hermes_providers_from_live, import_openclaw_providers_from_live,
-    import_opencode_providers_from_live, read_live_settings,
+    import_default_config, import_opencode_providers_from_live, read_live_settings,
     should_import_default_config_on_startup, sync_current_to_live,
 };
 
@@ -39,10 +38,7 @@ pub(crate) use live::{
 };
 
 // Internal re-exports
-use live::{
-    remove_hermes_provider_from_live, remove_openclaw_provider_from_live,
-    remove_opencode_provider_from_live, write_gemini_live,
-};
+use live::{remove_opencode_provider_from_live, write_gemini_live};
 use usage::validate_usage_script;
 
 const CONFIG_KEY_MODE_AUTO: &str = "auto";
@@ -61,13 +57,9 @@ pub struct SwitchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(any(target_os = "macos", windows))]
-    use crate::claude_desktop_config::PROFILE_ID;
     use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
     use crate::database::Database;
     use crate::provider::ProviderMeta;
-    #[cfg(any(target_os = "macos", windows))]
-    use crate::provider::{ClaudeDesktopMode, ClaudeDesktopModelRoute};
     use crate::proxy::types::ProxyConfig;
     use crate::store::AppState;
     use serde_json::json;
@@ -141,24 +133,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
-    fn claude_desktop_profile_path(home: &Path) -> PathBuf {
-        home.join("AppData")
-            .join("Local")
-            .join("Claude-3p")
-            .join("configLibrary")
-            .join(format!("{PROFILE_ID}.json"))
-    }
-
-    #[cfg(target_os = "macos")]
-    fn claude_desktop_profile_path(home: &Path) -> PathBuf {
-        home.join("Library")
-            .join("Application Support")
-            .join("Claude-3p")
-            .join("configLibrary")
-            .join(format!("{PROFILE_ID}.json"))
-    }
-
     fn test_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -188,28 +162,6 @@ mod tests {
         }
 
         result
-    }
-
-    fn openclaw_provider(id: &str) -> Provider {
-        Provider {
-            id: id.to_string(),
-            name: format!("Provider {id}"),
-            settings_config: json!({
-                "baseUrl": "https://api.deepseek.com",
-                "apiKey": "test-key",
-                "api": "openai-completions",
-                "models": [],
-            }),
-            website_url: None,
-            category: Some("custom".to_string()),
-            created_at: Some(1),
-            sort_index: Some(0),
-            notes: None,
-            meta: None,
-            icon: None,
-            icon_color: None,
-            in_failover_queue: false,
-        }
     }
 
     fn opencode_provider(id: &str) -> Provider {
@@ -520,128 +472,12 @@ base_url = "http://localhost:8080"
         );
     }
 
-    #[cfg(any(target_os = "macos", windows))]
-    #[tokio::test]
-    #[serial]
-    async fn update_current_claude_desktop_provider_syncs_profile_when_proxy_takeover_is_active() {
-        let home = TempHome::new();
-        crate::settings::reload_settings().expect("reload settings");
-
-        let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-
-        let mut original = Provider::with_id(
-            "p1".into(),
-            "Desktop A".into(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token-a",
-                    "ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go"
-                }
-            }),
-            None,
-        );
-        original.meta = Some(ProviderMeta {
-            api_format: Some("openai_chat".into()),
-            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
-            claude_desktop_model_routes: std::collections::HashMap::from([(
-                "claude-sonnet-4-6".into(),
-                ClaudeDesktopModelRoute {
-                    model: "deepseek-v4-flash".into(),
-                    label_override: Some("DeepSeek V4 Flash".into()),
-                    supports_1m: None,
-                },
-            )]),
-            ..Default::default()
-        });
-        db.save_provider("claude-desktop", &original)
-            .expect("save provider");
-        db.set_current_provider("claude-desktop", "p1")
-            .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::ClaudeDesktop, Some("p1"))
-            .expect("set local current provider");
-
-        // Claude Desktop keeps backup state from takeover startup; this sentinel only
-        // marks takeover as active so provider updates rewrite the 3P profile.
-        db.save_live_backup("claude-desktop", "{}")
-            .await
-            .expect("seed live backup");
-        {
-            let mut config = db
-                .get_proxy_config_for_app("claude-desktop")
-                .await
-                .expect("get app proxy config");
-            config.enabled = true;
-            db.update_proxy_config_for_app(config)
-                .await
-                .expect("update app proxy config");
-        }
-
-        state
-            .proxy_service
-            .start()
-            .await
-            .expect("start proxy service");
-
-        let mut updated = Provider::with_id(
-            "p1".into(),
-            "Desktop A".into(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token-updated",
-                    "ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go"
-                }
-            }),
-            None,
-        );
-        updated.meta = Some(ProviderMeta {
-            api_format: Some("openai_chat".into()),
-            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
-            claude_desktop_model_routes: std::collections::HashMap::from([(
-                "claude-sonnet-4-6".into(),
-                ClaudeDesktopModelRoute {
-                    model: "deepseek-v4-flash".into(),
-                    label_override: Some("DeepSeek V4 Flash Updated".into()),
-                    supports_1m: Some(true),
-                },
-            )]),
-            ..Default::default()
-        });
-
-        ProviderService::update(&state, AppType::ClaudeDesktop, None, updated.clone())
-            .expect("update current provider");
-
-        let backup = db
-            .get_live_backup("claude-desktop")
-            .await
-            .expect("get live backup")
-            .expect("backup exists");
-        assert_eq!(
-            backup.original_config, "{}",
-            "Claude Desktop provider edits should not rewrite takeover backup"
-        );
-
-        let profile_path = claude_desktop_profile_path(home.dir.path());
-        let profile: Value = read_json_file(&profile_path).expect("read desktop profile");
-        assert_eq!(
-            profile["inferenceGatewayBaseUrl"],
-            json!("http://127.0.0.1:15721/claude-desktop"),
-            "desktop profile should stay pointed at the local gateway during takeover"
-        );
-        assert_eq!(profile["inferenceGatewayAuthScheme"], json!("bearer"));
-        assert_eq!(
-            profile["inferenceModels"],
-            json!([{ "name": "claude-sonnet-4-6", "labelOverride": "DeepSeek V4 Flash Updated", "supports1m": true }]),
-            "provider edits should propagate into the Claude Desktop 3P profile during takeover"
-        );
-    }
-
     #[test]
     #[serial]
     fn rename_rejects_missing_original_provider() {
         with_test_home(|state, _| {
-            let original = openclaw_provider("deepseek");
-            ProviderService::add(state, AppType::OpenClaw, original.clone(), false)
+            let original = opencode_provider("deepseek");
+            ProviderService::add(state, AppType::OpenCode, original.clone(), false)
                 .expect("seed db-only provider");
 
             let mut renamed = original.clone();
@@ -649,7 +485,7 @@ base_url = "http://localhost:8080"
 
             let err = ProviderService::update(
                 state,
-                AppType::OpenClaw,
+                AppType::OpenCode,
                 Some("missing-provider"),
                 renamed,
             )
@@ -662,54 +498,11 @@ base_url = "http://localhost:8080"
             assert!(
                 state
                     .db
-                    .get_provider_by_id("deepseek-copy", AppType::OpenClaw.as_str())
+                    .get_provider_by_id("deepseek-copy", AppType::OpenCode.as_str())
                     .expect("query renamed provider")
                     .is_none(),
                 "rename must not create a new row when originalId is stale"
             );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn db_only_additive_update_survives_live_config_parse_errors() {
-        with_test_home(|state, home| {
-            let provider = openclaw_provider("deepseek");
-            ProviderService::add(state, AppType::OpenClaw, provider.clone(), false)
-                .expect("seed db-only provider");
-
-            let stored = state
-                .db
-                .get_provider_by_id("deepseek", AppType::OpenClaw.as_str())
-                .expect("query stored provider")
-                .expect("provider should exist");
-            assert_eq!(
-                stored
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.live_config_managed),
-                Some(false),
-                "db-only provider should be marked as not live-managed"
-            );
-
-            let openclaw_dir = home.join(".openclaw");
-            fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-            fs::write(openclaw_dir.join("openclaw.json"), "{ invalid json5")
-                .expect("write malformed config");
-
-            let mut updated = stored.clone();
-            updated.name = "DeepSeek Edited".to_string();
-            updated.meta.get_or_insert_with(ProviderMeta::default);
-
-            ProviderService::update(state, AppType::OpenClaw, None, updated)
-                .expect("db-only update should ignore live parse errors");
-
-            let saved = state
-                .db
-                .get_provider_by_id("deepseek", AppType::OpenClaw.as_str())
-                .expect("query updated provider")
-                .expect("updated provider should exist");
-            assert_eq!(saved.name, "DeepSeek Edited");
         });
     }
 
@@ -729,26 +522,6 @@ base_url = "http://localhost:8080"
             assert!(
                 !live_providers.contains_key(&provider.id),
                 "db-only opencode provider should not be written to live during sync"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn sync_current_provider_for_app_skips_db_only_openclaw_provider() {
-        with_test_home(|state, _| {
-            let provider = openclaw_provider("db-only-openclaw");
-            ProviderService::add(state, AppType::OpenClaw, provider.clone(), false)
-                .expect("seed db-only openclaw provider");
-
-            ProviderService::sync_current_provider_for_app(state, AppType::OpenClaw)
-                .expect("sync additive openclaw providers");
-
-            let live_providers = crate::openclaw_config::get_providers()
-                .expect("read openclaw providers after sync");
-            assert!(
-                !live_providers.contains_key(&provider.id),
-                "db-only openclaw provider should not be written to live during sync"
             );
         });
     }
@@ -812,34 +585,6 @@ base_url = "http://localhost:8080"
 
     #[test]
     #[serial]
-    fn sync_current_provider_for_app_restores_legacy_openclaw_provider_after_live_reset() {
-        with_test_home(|state, _| {
-            let mut provider = openclaw_provider("legacy-openclaw-reset");
-            provider.settings_config["models"] = json!([
-                {
-                    "id": "claude-sonnet-4",
-                    "name": "Claude Sonnet 4"
-                }
-            ]);
-            state
-                .db
-                .save_provider(AppType::OpenClaw.as_str(), &provider)
-                .expect("seed legacy openclaw provider in db");
-
-            ProviderService::sync_current_provider_for_app(state, AppType::OpenClaw)
-                .expect("sync legacy openclaw provider after reset");
-
-            let live_providers =
-                crate::openclaw_config::get_providers().expect("read openclaw providers");
-            assert!(
-                live_providers.contains_key(&provider.id),
-                "legacy openclaw provider should be restored when live config is reset"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
     fn import_opencode_providers_from_live_marks_provider_as_live_managed() {
         with_test_home(|state, _| {
             let provider = opencode_provider("imported-opencode");
@@ -862,67 +607,6 @@ base_url = "http://localhost:8080"
                     .and_then(|meta| meta.live_config_managed),
                 Some(true),
                 "providers imported from live should be treated as live-managed"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn import_openclaw_providers_from_live_marks_provider_as_live_managed() {
-        with_test_home(|state, _| {
-            let mut provider = openclaw_provider("imported-openclaw");
-            provider.settings_config["models"] = json!([
-                {
-                    "id": "claude-sonnet-4",
-                    "name": "Claude Sonnet 4"
-                }
-            ]);
-            crate::openclaw_config::set_provider(&provider.id, provider.settings_config.clone())
-                .expect("seed openclaw live provider");
-
-            let imported = import_openclaw_providers_from_live(state)
-                .expect("import openclaw providers from live");
-            assert_eq!(imported, 1);
-
-            let saved = state
-                .db
-                .get_provider_by_id(&provider.id, AppType::OpenClaw.as_str())
-                .expect("query imported openclaw provider")
-                .expect("imported openclaw provider should exist");
-            assert_eq!(
-                saved
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.live_config_managed),
-                Some(true),
-                "providers imported from live should be treated as live-managed"
-            );
-        });
-    }
-
-    #[test]
-    #[serial]
-    fn legacy_additive_provider_still_errors_on_live_config_parse_failure() {
-        with_test_home(|state, home| {
-            let provider = openclaw_provider("legacy-provider");
-            state
-                .db
-                .save_provider(AppType::OpenClaw.as_str(), &provider)
-                .expect("seed legacy provider without live_config_managed marker");
-
-            let openclaw_dir = home.join(".openclaw");
-            fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
-            fs::write(openclaw_dir.join("openclaw.json"), "{ invalid json5")
-                .expect("write malformed config");
-
-            let mut updated = provider.clone();
-            updated.name = "Legacy Edited".to_string();
-
-            let err = ProviderService::update(state, AppType::OpenClaw, None, updated)
-                .expect_err("legacy providers should still surface live parse errors");
-            assert!(
-                err.to_string().contains("Failed to parse OpenClaw config"),
-                "expected parse error, got {err:?}"
             );
         });
     }
@@ -1174,7 +858,7 @@ impl ProviderService {
     /// 优先从本地 settings 读取，验证后 fallback 到数据库的 is_current 字段。
     /// 这确保了云同步场景下多设备可以独立选择供应商，且返回的 ID 一定有效。
     ///
-    /// 对于累加模式应用（OpenCode, OpenClaw），不存在"当前供应商"概念，直接返回空字符串。
+    /// 对于累加模式应用（OpenCode），不存在"当前供应商"概念，直接返回空字符串。
     pub fn current(state: &AppState, app_type: AppType) -> Result<String, AppError> {
         // Additive mode apps have no "current" provider concept
         if app_type.is_additive_mode() {
@@ -1204,7 +888,7 @@ impl ProviderService {
         state.db.save_provider(app_type.as_str(), &provider)?;
         Self::sync_config_key_pool_from_provider(state, &app_type, &mut provider)?;
 
-        // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
+        // Additive mode apps (OpenCode): optionally write to live config.
         if app_type.is_additive_mode() {
             // OMO / OMO Slim providers use exclusive mode and write to dedicated config file.
             if matches!(app_type, AppType::OpenCode)
@@ -1324,7 +1008,7 @@ impl ProviderService {
             return Ok(true);
         }
 
-        // Additive mode apps (OpenCode, OpenClaw): only sync to live when the provider
+        // Additive mode apps (OpenCode): only sync to live when the provider
         // already exists in live config. Editing a DB-only provider must not auto-add it.
         if app_type.is_additive_mode() {
             let omo_variant = if matches!(app_type, AppType::OpenCode) {
@@ -1411,16 +1095,12 @@ impl ProviderService {
             let should_sync_via_proxy = has_live_backup || live_taken_over;
 
             if should_sync_via_proxy {
-                if matches!(app_type, AppType::ClaudeDesktop) {
-                    write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
-                } else {
-                    futures::executor::block_on(
-                        state
-                            .proxy_service
-                            .update_live_backup_from_provider(app_type.as_str(), &provider),
-                    )
-                    .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-                }
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .update_live_backup_from_provider(app_type.as_str(), &provider),
+                )
+                .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
 
                 if matches!(app_type, AppType::Claude)
                     && futures::executor::block_on(state.proxy_service.is_running())
@@ -1696,22 +1376,12 @@ impl ProviderService {
         let should_sync_via_proxy = has_live_backup || live_taken_over;
 
         if should_sync_via_proxy {
-            if matches!(app_type, AppType::ClaudeDesktop) {
-                patch_live_config_key(
-                    state.db.as_ref(),
-                    app_type,
-                    provider,
-                    auth_field,
-                    key_value,
-                )?;
-            } else {
-                futures::executor::block_on(state.proxy_service.patch_live_backup_config_key(
-                    app_type.as_str(),
-                    auth_field,
-                    key_value,
-                ))
-                .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-            }
+            futures::executor::block_on(state.proxy_service.patch_live_backup_config_key(
+                app_type.as_str(),
+                auth_field,
+                key_value,
+            ))
+            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
 
             if matches!(app_type, AppType::Claude)
                 && futures::executor::block_on(state.proxy_service.is_running())
@@ -1930,7 +1600,7 @@ impl ProviderService {
     /// Delete a provider
     ///
     /// 同时检查本地 settings 和数据库的当前供应商，防止删除任一端正在使用的供应商。
-    /// 对于累加模式应用（OpenCode, OpenClaw），可以随时删除任意供应商，同时从 live 配置中移除。
+    /// 对于累加模式应用（OpenCode），可以随时删除任意供应商，同时从 live 配置中移除。
     pub fn delete(state: &AppState, app_type: AppType, id: &str) -> Result<(), AppError> {
         // Additive mode apps - no current provider concept
         if app_type.is_additive_mode() {
@@ -1958,7 +1628,7 @@ impl ProviderService {
                 }
             }
 
-            // Non-OMO path for both OpenCode and OpenClaw:
+            // Non-OMO path for OpenCode:
             // remove from live first (atomicity), then DB.
             //
             // Use check_live_config_exists rather than trusting the flag alone: the flag
@@ -1971,8 +1641,6 @@ impl ProviderService {
             if Self::check_live_config_exists(&app_type, id, live_managed)? {
                 match app_type {
                     AppType::OpenCode => remove_opencode_provider_from_live(id)?,
-                    AppType::OpenClaw => remove_openclaw_provider_from_live(id)?,
-                    AppType::Hermes => remove_hermes_provider_from_live(id)?,
                     _ => {}
                 }
             }
@@ -1993,7 +1661,7 @@ impl ProviderService {
         state.db.delete_provider(app_type.as_str(), id)
     }
 
-    /// Remove provider from live config only (for additive mode apps like OpenCode, OpenClaw)
+    /// Remove provider from live config only (for additive mode apps like OpenCode)
     ///
     /// Does NOT delete from database - provider remains in the list.
     /// This is used when user wants to "remove" a provider from active config
@@ -2031,12 +1699,6 @@ impl ProviderService {
                 } else {
                     remove_opencode_provider_from_live(id)?;
                 }
-            }
-            AppType::OpenClaw => {
-                remove_openclaw_provider_from_live(id)?;
-            }
-            AppType::Hermes => {
-                remove_hermes_provider_from_live(id)?;
             }
             _ => {
                 return Err(AppError::Message(format!(
@@ -2082,10 +1744,6 @@ impl ProviderService {
         if matches!(app_type, AppType::OpenCode)
             && _provider.category.as_deref() == Some("omo-slim")
         {
-            return Self::switch_normal(state, app_type, id, &providers);
-        }
-
-        if matches!(app_type, AppType::ClaudeDesktop) {
             return Self::switch_normal(state, app_type, id, &providers);
         }
 
@@ -2229,25 +1887,6 @@ impl ProviderService {
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
         write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
 
-        // Hermes is additive, so "switching" doesn't overwrite a live config file
-        // — we instead update the top-level `model:` section to point at this
-        // provider's first declared model. Without this, clicking "switch" would
-        // only shuffle entries in custom_providers[] while Hermes keeps using
-        // whatever `model.provider` was set before.
-        if matches!(app_type, AppType::Hermes) {
-            if let Err(e) =
-                crate::hermes_config::apply_switch_defaults(&provider.id, &provider.settings_config)
-            {
-                log::warn!(
-                    "Failed to update Hermes model defaults after switching to '{}': {e}",
-                    provider.id
-                );
-                result
-                    .warnings
-                    .push(format!("hermes_model_defaults_failed:{}", provider.id));
-            }
-        }
-
         // For additive-mode providers that were DB-only (live_config_managed == Some(false)),
         // flip the flag to true now that the provider has been successfully written to the live
         // file. This ensures sync_all_providers_to_live() will include it on future syncs.
@@ -2261,8 +1900,6 @@ impl ProviderService {
             if let Err(e) = state.db.save_provider(app_type.as_str(), &updated) {
                 let rollback_result = match app_type {
                     AppType::OpenCode => remove_opencode_provider_from_live(&provider.id),
-                    AppType::OpenClaw => remove_openclaw_provider_from_live(&provider.id),
-                    AppType::Hermes => remove_hermes_provider_from_live(&provider.id),
                     _ => Ok(()),
                 };
 
@@ -2326,11 +1963,6 @@ impl ProviderService {
         // See the save path above: backup/placeholders are the ownership signal
         // here, not just proxy_config.enabled.
         if has_live_backup || live_taken_over {
-            if matches!(app_type, AppType::ClaudeDesktop) {
-                write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
-                return Ok(());
-            }
-
             futures::executor::block_on(
                 state
                     .proxy_service
@@ -2437,12 +2069,9 @@ impl ProviderService {
 
         match app_type {
             AppType::Claude => Self::extract_claude_common_config(&provider.settings_config),
-            AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(&provider.settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(&provider.settings_config),
             AppType::OpenCode => Self::extract_opencode_common_config(&provider.settings_config),
-            AppType::OpenClaw => Self::extract_openclaw_common_config(&provider.settings_config),
-            AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
         }
     }
 
@@ -2453,12 +2082,9 @@ impl ProviderService {
     ) -> Result<String, AppError> {
         match app_type {
             AppType::Claude => Self::extract_claude_common_config(settings_config),
-            AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(settings_config),
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
-            AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
-            AppType::Hermes => Ok(String::new()), // Hermes doesn't use common config snippets
         }
     }
 
@@ -2618,27 +2244,6 @@ impl ProviderService {
             .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
     }
 
-    /// Extract common config for OpenClaw (JSON format)
-    fn extract_openclaw_common_config(settings: &Value) -> Result<String, AppError> {
-        // OpenClaw uses a different config structure with baseUrl, apiKey, api, models
-        // For common config, we exclude provider-specific fields like apiKey
-        let mut config = settings.clone();
-
-        // Remove provider-specific fields
-        if let Some(obj) = config.as_object_mut() {
-            obj.remove("apiKey");
-            obj.remove("baseUrl");
-            // Keep api and models as they might be common
-        }
-
-        if config.is_null() || (config.is_object() && config.as_object().unwrap().is_empty()) {
-            return Ok("{}".to_string());
-        }
-
-        serde_json::to_string_pretty(&config)
-            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
-    }
-
     /// Import default configuration from live files (re-export)
     ///
     /// Returns `Ok(true)` if imported, `Ok(false)` if skipped.
@@ -2787,9 +2392,6 @@ impl ProviderService {
                     ));
                 }
             }
-            AppType::ClaudeDesktop => {
-                crate::claude_desktop_config::validate_provider(provider)?;
-            }
             AppType::Codex => {
                 let settings = provider.settings_config.as_object().ok_or_else(|| {
                     AppError::localized(
@@ -2842,27 +2444,6 @@ impl ProviderService {
                         "provider.opencode.settings.not_object",
                         "OpenCode 配置必须是 JSON 对象",
                         "OpenCode configuration must be a JSON object",
-                    ));
-                }
-            }
-            AppType::OpenClaw => {
-                // OpenClaw uses config structure: { baseUrl, apiKey, api, models }
-                // Basic validation - must be an object
-                if !provider.settings_config.is_object() {
-                    return Err(AppError::localized(
-                        "provider.openclaw.settings.not_object",
-                        "OpenClaw 配置必须是 JSON 对象",
-                        "OpenClaw configuration must be a JSON object",
-                    ));
-                }
-            }
-            AppType::Hermes => {
-                // Hermes: accept any JSON object for now
-                if !provider.settings_config.is_object() {
-                    return Err(AppError::localized(
-                        "provider.hermes.settings.not_object",
-                        "Hermes 配置必须是 JSON 对象",
-                        "Hermes configuration must be a JSON object",
                     ));
                 }
             }
@@ -2929,11 +2510,6 @@ impl ProviderService {
                     .to_string();
 
                 Ok((api_key, base_url))
-            }
-            AppType::ClaudeDesktop => {
-                let credentials =
-                    crate::claude_desktop_config::direct_gateway_credentials(provider)?;
-                Ok((credentials.api_key, credentials.base_url))
             }
             AppType::Codex => {
                 let _auth = provider
@@ -3042,30 +2618,6 @@ impl ProviderService {
 
                 let base_url = options
                     .get("baseURL")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                Ok((api_key, base_url))
-            }
-            AppType::OpenClaw | AppType::Hermes => {
-                // OpenClaw/Hermes use apiKey and baseUrl directly on the object
-                let api_key = provider
-                    .settings_config
-                    .get("apiKey")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        AppError::localized(
-                            "provider.openclaw.api_key.missing",
-                            "缺少 API Key",
-                            "API key is missing",
-                        )
-                    })?
-                    .to_string();
-
-                let base_url = provider
-                    .settings_config
-                    .get("baseUrl")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();

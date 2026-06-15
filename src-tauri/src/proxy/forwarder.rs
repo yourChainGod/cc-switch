@@ -1557,18 +1557,10 @@ impl RequestForwarder {
             .unwrap_or(false);
 
         // 应用模型映射（独立于格式转换）
-        // Claude Desktop proxy 模式必须先把 Desktop 可见的 claude-* route
-        // 映射成真实上游模型名，并且未知 route 要直接报错，不能使用默认模型兜底。
         // 路由层模型映射在原始客户端模型上求解（见下方覆盖步骤），故先快照原始模型名。
         let original_request_model = body.get("model").and_then(|m| m.as_str()).map(str::to_string);
-        let mapped_body = if matches!(app_type, AppType::ClaudeDesktop) {
-            crate::claude_desktop_config::map_proxy_request_model(body.clone(), provider)
-                .map_err(|e| ProxyError::InvalidRequest(e.to_string()))?
-        } else {
-            let (mapped_body, _original_model, _mapped_model) =
-                super::model_mapper::apply_model_mapping(body.clone(), provider);
-            mapped_body
-        };
+        let (mapped_body, _original_model, _mapped_model) =
+            super::model_mapper::apply_model_mapping(body.clone(), provider);
 
         // 与 CCH 对齐：请求前不做 thinking 主动改写（仅保留兼容入口）
         let mut mapped_body = normalize_thinking_type(mapped_body);
@@ -1580,22 +1572,19 @@ impl RequestForwarder {
 
         // 路由层模型映射（最终权威）：按客户端区分、对原始客户端模型求解，命中即用
         // 目标模型覆盖上面所有逻辑（catalog/env/pin）。未配置任何规则或未命中时不动，
-        // 行为与现状完全一致。claude-desktop 走自身严格映射，不参与本步。
-        if !matches!(app_type, AppType::ClaudeDesktop) {
-            if let Some(original) = original_request_model.as_deref() {
-                let rules =
-                    super::model_routing::rules_for(&self.model_routing, app_type.as_str());
-                if let Some(hit) = super::model_routing::resolve(rules, original) {
-                    log::info!(
-                        "[{}] [ModelRouting] {original} → {} (rule #{})",
-                        app_type.as_str(),
-                        hit.target,
-                        hit.rule_index
-                    );
-                    mapped_body["model"] = serde_json::json!(hit.target);
-                    mapped_body =
-                        super::model_mapper::strip_one_m_suffix_for_upstream_from_body(mapped_body);
-                }
+        // 行为与现状完全一致。
+        if let Some(original) = original_request_model.as_deref() {
+            let rules = super::model_routing::rules_for(&self.model_routing, app_type.as_str());
+            if let Some(hit) = super::model_routing::resolve(rules, original) {
+                log::info!(
+                    "[{}] [ModelRouting] {original} → {} (rule #{})",
+                    app_type.as_str(),
+                    hit.target,
+                    hit.rule_index
+                );
+                mapped_body["model"] = serde_json::json!(hit.target);
+                mapped_body =
+                    super::model_mapper::strip_one_m_suffix_for_upstream_from_body(mapped_body);
             }
         }
 

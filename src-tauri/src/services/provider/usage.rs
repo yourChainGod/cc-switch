@@ -84,7 +84,7 @@ pub(crate) async fn execute_and_format_usage_result(
 /// Resolve `(api_key, base_url)` for JS usage scripts.
 ///
 /// Explicit non-empty script values win; otherwise fall back to the provider's
-/// per-app credential resolver so Codex/auth+config.toml, Gemini env, Hermes,
+/// per-app credential resolver so Codex/auth+config.toml, Gemini env,
 /// OpenCode, etc. all match the values previewed in the UI.
 fn resolve_script_credentials(
     app_type: &AppType,

@@ -30,12 +30,9 @@ export function AppVisibilitySettings({
 
   const visibleApps: VisibleApps = settings.visibleApps ?? {
     claude: true,
-    "claude-desktop": true,
     codex: true,
     gemini: true,
     opencode: true,
-    openclaw: true,
-    hermes: true,
   };
 
   // Count how many apps are currently visible
@@ -64,7 +61,7 @@ export function AppVisibilitySettings({
           {t("settings.appVisibility.description")}
         </p>
       </header>
-      <div className="inline-flex flex-wrap gap-1 rounded-md border border-border-default bg-background p-1">
+      <div className="grid grid-cols-2 gap-1 rounded-md border border-border-default bg-background p-1">
         {APP_CONFIG.map((app) => {
           const isVisible = visibleApps[app.id];
           // Disable button if this is the last visible app
@@ -113,7 +110,7 @@ function AppButton({
       size="sm"
       variant={active ? "default" : "ghost"}
       className={cn(
-        "min-w-[90px] w-auto gap-1.5 px-3",
+        "w-full justify-start gap-1.5 px-3",
         active
           ? "shadow-sm"
           : "text-muted-foreground hover:text-foreground hover:bg-muted",

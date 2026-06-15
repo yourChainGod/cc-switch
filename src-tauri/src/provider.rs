@@ -129,16 +129,6 @@ impl Provider {
                 let api_key = first_non_empty(env, &["GEMINI_API_KEY", "GOOGLE_API_KEY"]);
                 (base_url, api_key)
             }
-            // Hermes (config.yaml) flattens credentials at the top level, snake_case.
-            AppType::Hermes => (
-                str_at(settings.get("base_url")),
-                str_at(settings.get("api_key")),
-            ),
-            // OpenClaw (openclaw.json) flattens credentials at the top level, camelCase.
-            AppType::OpenClaw => (
-                str_at(settings.get("baseUrl")),
-                str_at(settings.get("apiKey")),
-            ),
             // OpenCode (OMO) nests credentials under `options` (the SDK options object).
             AppType::OpenCode => {
                 let options = settings.get("options");
@@ -147,10 +137,10 @@ impl Provider {
                     str_at(options.and_then(|o| o.get("apiKey"))),
                 )
             }
-            // Claude and Claude Desktop both use the Anthropic-style env map, keeping
+            // Claude uses the Anthropic-style env map, keeping
             // the OpenRouter/Google key fallbacks the JS-script path relies on.
             // Listed explicitly (not `_`) so a new AppType fails to compile here.
-            AppType::Claude | AppType::ClaudeDesktop => {
+            AppType::Claude => {
                 let env = settings.get("env");
                 let base_url = str_at(env.and_then(|e| e.get("ANTHROPIC_BASE_URL")));
                 let api_key = first_non_empty(
@@ -276,28 +266,6 @@ pub struct ProviderTestConfig {
     /// 最大重试次数
     #[serde(rename = "maxRetries", skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
-}
-
-/// Claude Desktop 3P 写入模式。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ClaudeDesktopMode {
-    Direct,
-    Proxy,
-}
-
-/// Claude Desktop 本地路由模式下暴露给 Desktop 的安全模型路由。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeDesktopModelRoute {
-    /// 真实上游模型名，只保存在 CC Switch 内部，不写入 Claude Desktop profile。
-    pub model: String,
-    /// Claude Desktop 模型菜单显示名；写入 profile 的 `labelOverride`。
-    #[serde(rename = "labelOverride", skip_serializing_if = "Option::is_none")]
-    pub label_override: Option<String>,
-    /// Claude Desktop 3P 识别的 1M 上下文能力标记。
-    #[serde(rename = "supports1m", skip_serializing_if = "Option::is_none")]
-    pub supports_1m: Option<bool>,
 }
 
 /// Codex Responses -> Chat Completions 的 reasoning 能力描述。
@@ -496,8 +464,6 @@ pub fn infer_provider_key_auth_field(
     match app_type {
         "codex" => "OPENAI_API_KEY",
         "gemini" => "GEMINI_API_KEY",
-        "openclaw" => "apiKey",
-        "hermes" => "api_key",
         "opencode" => "options.apiKey",
         _ => "ANTHROPIC_AUTH_TOKEN",
     }
@@ -553,8 +519,6 @@ pub fn extract_provider_config_key(
 
     match app_type {
         "gemini" => push_provider_key_auth_field(&mut fields, Some("GEMINI_API_KEY")),
-        "openclaw" => push_provider_key_auth_field(&mut fields, Some("apiKey")),
-        "hermes" => push_provider_key_auth_field(&mut fields, Some("api_key")),
         "opencode" => push_provider_key_auth_field(&mut fields, Some("options.apiKey")),
         _ => {
             push_provider_key_auth_field(&mut fields, Some("ANTHROPIC_AUTH_TOKEN"));
@@ -829,16 +793,6 @@ pub struct ProviderMeta {
         skip_serializing_if = "Option::is_none"
     )]
     pub common_config_enabled: Option<bool>,
-    /// Claude Desktop 3P 写入模式：direct（直连）或 proxy（预留）
-    #[serde(rename = "claudeDesktopMode", skip_serializing_if = "Option::is_none")]
-    pub claude_desktop_mode: Option<ClaudeDesktopMode>,
-    /// Claude Desktop proxy 模式的模型路由映射：Claude-safe route -> upstream model。
-    #[serde(
-        default,
-        rename = "claudeDesktopModelRoutes",
-        skip_serializing_if = "HashMap::is_empty"
-    )]
-    pub claude_desktop_model_routes: HashMap<String, ClaudeDesktopModelRoute>,
     /// 用量查询脚本配置
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_script: Option<UsageScript>,
@@ -1707,36 +1661,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_credentials_hermes_snake_case() {
-        let p = provider_with(json!({
-            "base_url": "https://api.deepseek.com",
-            "api_key": "sk-hermes",
-        }));
-        assert_eq!(
-            p.resolve_usage_credentials(&AppType::Hermes),
-            (
-                "https://api.deepseek.com".to_string(),
-                "sk-hermes".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn resolve_credentials_openclaw_camel_case() {
-        let p = provider_with(json!({
-            "baseUrl": "https://api.deepseek.com",
-            "apiKey": "sk-openclaw",
-        }));
-        assert_eq!(
-            p.resolve_usage_credentials(&AppType::OpenClaw),
-            (
-                "https://api.deepseek.com".to_string(),
-                "sk-openclaw".to_string()
-            )
-        );
-    }
-
-    #[test]
     fn resolve_credentials_opencode_options() {
         // OpenCode (OMO) nests creds under options.{baseURL,apiKey}; useOpencodeFormState
         // writes config.options.apiKey, so the stored provider keeps them there.
@@ -1753,26 +1677,6 @@ mod tests {
             (
                 "https://api.deepseek.com/v1".to_string(),
                 "sk-opencode".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn resolve_credentials_claude_desktop_uses_env() {
-        // ClaudeDesktop persists the Anthropic env shape (ClaudeDesktopProviderForm
-        // reads env.ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN), so it resolves via
-        // the default env branch — it is NOT unsupported.
-        let p = provider_with(json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-                "ANTHROPIC_AUTH_TOKEN": "sk-desktop",
-            }
-        }));
-        assert_eq!(
-            p.resolve_usage_credentials(&AppType::ClaudeDesktop),
-            (
-                "https://api.deepseek.com/anthropic".to_string(),
-                "sk-desktop".to_string()
             )
         );
     }

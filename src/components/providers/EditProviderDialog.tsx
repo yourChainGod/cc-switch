@@ -20,7 +20,7 @@ import {
   ProviderKeyPoolDialog,
   type ProviderKeyPoolController,
 } from "@/components/providers/keyPool/ProviderKeyPoolDialog";
-import { openclawApi, providersApi, vscodeApi, type AppId } from "@/lib/api";
+import { providersApi, vscodeApi, type AppId } from "@/lib/api";
 import { usageApi } from "@/lib/api/usage";
 import { autoConfigureSub2apiUsage } from "@/lib/usage/autoDetectSub2api";
 import { isAdditiveApp } from "@/config/additiveApps";
@@ -173,25 +173,6 @@ export function EditProviderDialog({
         return;
       }
 
-      if (appId === "openclaw") {
-        try {
-          const live = await openclawApi.getLiveProvider(provider.id);
-          if (!cancelled && live && typeof live === "object") {
-            setLiveSettings(live);
-          } else if (!cancelled) {
-            setLiveSettings(null);
-          }
-        } catch {
-          if (!cancelled) {
-            setLiveSettings(null);
-          }
-        } finally {
-          if (!cancelled) {
-            setHasLoadedLive(true);
-          }
-        }
-        return;
-      }
 
       try {
         const currentId = await providersApi.getCurrent(appId);
@@ -441,7 +422,7 @@ export function EditProviderDialog({
         string,
         unknown
       >;
-      // providerKey 型应用（OpenCode/OpenClaw/Hermes）：providerKey 即主键 ID，
+      // providerKey 型应用（OpenCode）：providerKey 即主键 ID，
       // 编辑未锁定的供应商时允许通过修改 providerKey 重命名 ID
       const nextProviderId =
         isAdditiveApp(appId) && values.providerKey?.trim()
@@ -990,10 +971,6 @@ function buildCandidateAuthFields(
     add("OPENAI_API_KEY");
   } else if (appId === "gemini") {
     add("GEMINI_API_KEY");
-  } else if (appId === "openclaw") {
-    add("apiKey");
-  } else if (appId === "hermes") {
-    add("api_key");
   } else if (appId === "opencode") {
     add("options.apiKey");
   } else {

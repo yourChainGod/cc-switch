@@ -7,8 +7,7 @@ Tauri desktop workflow and provider compatibility.
 
 The target behavior is:
 
-- one local desktop proxy for Claude Code, Codex, Gemini CLI, Claude Desktop,
-  OpenCode, OpenClaw, and Hermes;
+- one local desktop proxy for Claude Code, Codex, Gemini CLI, and OpenCode;
 - providers can own a pool of API keys or account tokens;
 - retry/failover works at `provider:key` channel level, not only provider level;
 - successful channels are remembered per session and reused until they fail or

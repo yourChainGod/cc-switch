@@ -82,7 +82,6 @@ describe("useProxyStatus", () => {
           codex: false,
           gemini: false,
           opencode: false,
-          openclaw: false,
         });
       }
 

@@ -51,17 +51,6 @@ export const OPENCODE_KNOWN_OPTION_KEYS = [
   "headers",
 ] as const;
 
-export const OPENCLAW_DEFAULT_CONFIG = JSON.stringify(
-  {
-    baseUrl: "",
-    apiKey: "",
-    api: "openai-completions",
-    models: [],
-  },
-  null,
-  2,
-);
-
 // ── Pure functions ───────────────────────────────────────────────────
 
 export function isKnownOpencodeOptionKey(key: string): boolean {

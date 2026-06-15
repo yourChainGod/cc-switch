@@ -364,7 +364,7 @@ fn normalize_model_id(value: &str) -> String {
         .trim()
         .to_ascii_lowercase();
     if let Some(stripped) =
-        normalized.strip_suffix(crate::claude_desktop_config::ONE_M_CONTEXT_MARKER)
+        normalized.strip_suffix(crate::proxy::model_mapper::ONE_M_CONTEXT_MARKER)
     {
         normalized = stripped.trim().to_string();
     }
