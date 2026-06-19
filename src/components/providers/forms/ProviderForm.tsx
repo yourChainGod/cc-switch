@@ -557,6 +557,43 @@ function ProviderFormFull({
       );
     });
 
+  // 复用表单实例时，仅在挂载时初始化的“API 格式 / 认证字段”本地状态不会随
+  // initialData 变化自动刷新（RHF 字段由上方 form.reset(defaultValues) 同步，
+  // 但这些独立的 useState 不在其中），会残留上一个供应商的取值。
+  // 典型表现：Claude 编辑页 API 格式下拉错误显示上一个供应商的 openai_responses，
+  // 保存后写坏 meta.apiFormat 引发错误。这里在切换编辑对象时按各自初始化逻辑重新同步。
+  useEffect(() => {
+    setLocalApiFormat(
+      appId === "claude"
+        ? (initialData?.meta?.apiFormat ?? "anthropic")
+        : "anthropic",
+    );
+
+    setLocalApiKeyField(() => {
+      if (appId !== "claude") return "ANTHROPIC_AUTH_TOKEN";
+      if (initialData?.meta?.apiKeyField) return initialData.meta.apiKeyField;
+      const env = (initialData?.settingsConfig as Record<string, unknown>)
+        ?.env as Record<string, unknown> | undefined;
+      if (env?.ANTHROPIC_API_KEY !== undefined) return "ANTHROPIC_API_KEY";
+      return "ANTHROPIC_AUTH_TOKEN";
+    });
+
+    setLocalCodexApiFormat(() => {
+      if (initialData?.meta?.apiFormat === "openai_chat") return "openai_chat";
+      if (initialData?.meta?.apiFormat === "openai_responses")
+        return "openai_responses";
+      return (
+        codexApiFormatFromWireApi(
+          extractCodexWireApi(
+            typeof initialData?.settingsConfig?.config === "string"
+              ? initialData.settingsConfig.config
+              : "",
+          ),
+        ) ?? "openai_responses"
+      );
+    });
+  }, [appId, initialData]);
+
   const { configError: codexConfigError, debouncedValidate } =
     useCodexTomlValidation();
 
