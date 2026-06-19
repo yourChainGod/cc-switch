@@ -4,7 +4,7 @@ import { useSettingsQuery } from "@/lib/query";
 import type { Settings } from "@/types";
 import { sanitizeDirectorySettingsFields } from "./useDirectorySettings";
 
-type Language = "zh" | "zh-TW" | "en" | "ja";
+type Language = "zh" | "zh-TW" | "en" | "ja" | "ru";
 
 export type SettingsFormState = Omit<Settings, "language"> & {
   language: Language;
@@ -31,6 +31,10 @@ const normalizeLanguage = (lang?: string | null): Language => {
     return normalized;
   }
 
+  if (normalized.startsWith("ru")) {
+    return "ru";
+  }
+
   if (normalized.startsWith("zh")) {
     return "zh";
   }
@@ -42,7 +46,10 @@ const isSupportedLanguage = (lang?: string | null): boolean => {
   if (!lang) return false;
   const normalized = lang.toLowerCase().replace(/_/g, "-");
   return (
-    normalized === "en" || normalized === "ja" || normalized.startsWith("zh")
+    normalized === "en" ||
+    normalized === "ja" ||
+    normalized.startsWith("ru") ||
+    normalized.startsWith("zh")
   );
 };
 

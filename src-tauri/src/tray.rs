@@ -70,6 +70,13 @@ impl TrayTexts {
                 quit: "退出",
                 _auto_label: "自動 (故障轉移)",
             },
+            "ru" => Self {
+                show_main: "Открыть главное окно",
+                no_providers_label: "(нет провайдеров)",
+                lightweight_mode: "Облегчённый режим",
+                quit: "Выход",
+                _auto_label: "Авто (аварийное переключение)",
+            },
             _ => Self {
                 show_main: "打开主界面",
                 no_providers_label: "(无供应商)",
