@@ -739,18 +739,18 @@ impl RequestForwarder {
                     });
                 }
                 Err(mut e) => {
-                    // anyrouter 429 限流特判：同通道高强度重试，预算独立于
+                    // anyrouter 429/503 特判：同通道高强度重试，预算独立于
                     // AppProxyConfig.max_retries（该设置只管"换几家"，不管这里）。
                     // 重试间隔尊重上游 Retry-After（封顶），否则短退避线性爬升。
-                    // anyrouter 限流是分钟级窗口 + 后端轮转，冷却/熔断只会把
+                    // anyrouter 限流/不可用是分钟级窗口 + 后端轮转，冷却/熔断只会把
                     // 大概率马上恢复的通道踢出轮转，因此全程不标记冷却。
                     let is_anyrouter = is_anyrouter_channel(
                         &provider.name,
                         &adapter.extract_base_url(provider).unwrap_or_default(),
                     );
-                    if is_anyrouter && is_rate_limited_upstream_error(&e) {
+                    if is_anyrouter && is_transient_upstream_error(&e) {
                         let mut retry_round: u64 = 0;
-                        while anyrouter_429_retry_budget > 0 && is_rate_limited_upstream_error(&e)
+                        while anyrouter_429_retry_budget > 0 && is_transient_upstream_error(&e)
                         {
                             let wait_ms = match &e {
                                 ProxyError::UpstreamError {
@@ -764,7 +764,7 @@ impl RequestForwarder {
                             };
                             if wait_ms > anyrouter_429_wait_budget_ms {
                                 log::warn!(
-                                    "[{app_type_str}] [anyrouter] 429 重试等待预算耗尽，转入故障转移: provider={}",
+                                    "[{app_type_str}] [anyrouter] 429/503 重试等待预算耗尽，转入故障转移: provider={}",
                                     provider.name
                                 );
                                 break;
@@ -773,7 +773,7 @@ impl RequestForwarder {
                             anyrouter_429_retry_budget -= 1;
                             retry_round += 1;
                             log::info!(
-                                "[{app_type_str}] [anyrouter] 上游 429 限流，{wait_ms}ms 后同通道重试（第 {retry_round} 次，剩余预算 {anyrouter_429_retry_budget}）: provider={}",
+                                "[{app_type_str}] [anyrouter] 上游 429/503，{wait_ms}ms 后同通道重试（第 {retry_round} 次，剩余预算 {anyrouter_429_retry_budget}）: provider={}",
                                 provider.name
                             );
                             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
@@ -793,7 +793,7 @@ impl RequestForwarder {
                             {
                                 Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!(
-                                        "[{app_type_str}] [anyrouter] 429 重试成功（共重试 {retry_round} 次）: provider={}",
+                                        "[{app_type_str}] [anyrouter] 429/503 重试成功（共重试 {retry_round} 次）: provider={}",
                                         provider.name
                                     );
                                     return Ok(self
@@ -814,7 +814,7 @@ impl RequestForwarder {
                                 }
                             }
                         }
-                        // 仍是 429：落入下方通用分类，但不标记冷却（见
+                        // 仍是 429/503：落入下方通用分类，但不标记冷却（见
                         // skip_failure_marking）；变成其他错误则按正常轨道处理。
                     }
 
@@ -1341,9 +1341,9 @@ impl RequestForwarder {
                     //    不应污染熔断器和数据库健康度（与 release_permit_neutral 同语义）。
                     let category = self.categorize_proxy_error(&e);
                     let key_scoped_retry = key_id.is_some() && is_key_scoped_error(&e);
-                    // anyrouter 429：限流不是通道/key 故障，不计入冷却与熔断健康度，
+                    // anyrouter 429/503：限流/不可用不是通道/key 故障，不计入冷却与熔断健康度，
                     // 也不清除亲和（下一请求应继续优先命中该通道）。
-                    let skip_failure_marking = is_anyrouter && is_rate_limited_upstream_error(&e);
+                    let skip_failure_marking = is_anyrouter && is_transient_upstream_error(&e);
 
                     match category {
                         ErrorCategory::Retryable if key_id.is_some() => {
@@ -1360,7 +1360,7 @@ impl RequestForwarder {
                                 .await;
                             if skip_failure_marking {
                                 log::info!(
-                                    "[{app_type_str}] [anyrouter] 429 不计入 key 冷却: provider={}, key_id={key_id:?}",
+                                    "[{app_type_str}] [anyrouter] 429/503 不计入 key 冷却: provider={}, key_id={key_id:?}",
                                     provider.name
                                 );
                             } else {
@@ -1387,7 +1387,7 @@ impl RequestForwarder {
                             //（anyrouter 429 例外：限流不是通道故障，仅中性释放 permit）
                             if skip_failure_marking {
                                 log::info!(
-                                    "[{app_type_str}] [anyrouter] 429 不计入通道冷却/熔断: provider={}",
+                                    "[{app_type_str}] [anyrouter] 429/503 不计入通道冷却/熔断: provider={}",
                                     provider.name
                                 );
                                 self.router
@@ -2659,11 +2659,11 @@ const ANYROUTER_KNOWN_HOSTS: &[&str] = &["anyrouter.top", "a-ocnfniawgw.cn-shang
 /// anyrouter 要求显式携带的 1M 上下文 beta flag（ccLoad 同款适配）。
 const ANYROUTER_CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
-/// anyrouter 429 限流的同通道重试预算（每个客户端请求共享，跨 key 计数）。
+/// anyrouter 429/503 的同通道重试预算（每个客户端请求共享，跨 key 计数）。
 ///
-/// anyrouter 的 429 来自分钟级滚动窗口 + 后端账号轮转，稍候重试大概率
+/// anyrouter 的 429/503 来自分钟级滚动窗口 + 后端账号轮转，稍候重试大概率
 /// 落到可用后端，因此预算刻意不受 AppProxyConfig.max_retries 约束、给足量；
-/// 同时 429 不计入 key/通道冷却与熔断健康度（见 forward_with_retry_inner）。
+/// 同时不计入 key/通道冷却与熔断健康度（见 forward_with_retry_inner）。
 const ANYROUTER_RATE_LIMIT_MAX_RETRIES: usize = 50;
 /// anyrouter 429 重试间隔：线性爬升（250ms、500ms、…）封顶 2.5s；
 /// 上游显式 Retry-After 优先，单次封顶 30s。
@@ -2674,9 +2674,11 @@ const ANYROUTER_RATE_LIMIT_RETRY_AFTER_CAP_SECS: u64 = 30;
 /// 防止上游持续回大 Retry-After 时把单个请求挂死。
 const ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS: u64 = 120_000;
 
-/// 上游 429 限流错误（anyrouter 特判用）。
-fn is_rate_limited_upstream_error(error: &ProxyError) -> bool {
-    matches!(error, ProxyError::UpstreamError { status: 429, .. })
+/// 上游“稍后重试”类错误（anyrouter 特判用）：429 限流 + 503 不可用。
+/// anyrouter 后端分钟级轮转，二者大概率稍候即恢复，故都按瞬时可重试处理
+/// （同通道重试 + 不计入 key/通道冷却与熔断健康度）。
+fn is_transient_upstream_error(error: &ProxyError) -> bool {
+    matches!(error, ProxyError::UpstreamError { status: 429 | 503, .. })
 }
 
 fn is_anyrouter_channel(provider_name: &str, base_url: &str) -> bool {
@@ -3012,6 +3014,20 @@ mod tests {
             body: body.map(ToString::to_string),
             retry_after,
         }
+    }
+
+    #[test]
+    fn transient_upstream_error_matches_429_and_503_only() {
+        // anyrouter 同通道重试 + 不标记冷却的触发条件：429 限流 / 503 不可用。
+        assert!(is_transient_upstream_error(&upstream_error(429, None, None)));
+        assert!(is_transient_upstream_error(&upstream_error(503, None, None)));
+        // 相邻的 5xx 与客户端错误不在此列。
+        assert!(!is_transient_upstream_error(&upstream_error(500, None, None)));
+        assert!(!is_transient_upstream_error(&upstream_error(502, None, None)));
+        assert!(!is_transient_upstream_error(&upstream_error(400, None, None)));
+        assert!(!is_transient_upstream_error(&upstream_error(200, None, None)));
+        // 非上游 HTTP 错误（如无可用供应商）不触发。
+        assert!(!is_transient_upstream_error(&ProxyError::NoAvailableProvider));
     }
 
     #[test]
