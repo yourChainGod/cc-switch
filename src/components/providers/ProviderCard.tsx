@@ -163,7 +163,11 @@ function ProviderCardImpl({
   const handleDisableAnyOmo = isOmoSlim ? onDisableOmoSlim : onDisableOmo;
   const isAdditiveMode = appId === "opencode" && !isAnyOmo;
 
-  const { data: health } = useProviderHealth(provider.id, appId);
+  // 健康数据只在下方 isProxyRunning && isInFailoverQueue 时展示，
+  // 因此仅在该条件下轮询，避免空闲态每张卡 5s 一次的无效 IPC/重渲染。
+  const { data: health } = useProviderHealth(provider.id, appId, {
+    enabled: isProxyRunning && isInFailoverQueue,
+  });
 
   const fallbackUrlText = t("provider.notConfigured", {
     defaultValue: "未配置接口地址",

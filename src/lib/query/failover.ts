@@ -9,11 +9,17 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 /**
  * 获取供应商健康状态
  */
-export function useProviderHealth(providerId: string, appType: string) {
+export function useProviderHealth(
+  providerId: string,
+  appType: string,
+  options?: { enabled?: boolean },
+) {
   return useQuery({
     queryKey: ["providerHealth", providerId, appType],
     queryFn: () => failoverApi.getProviderHealth(providerId, appType),
-    enabled: !!providerId && !!appType,
+    // 仅当健康徽章会真正显示时才轮询（调用方传 enabled）。
+    // 否则每张卡片都无条件 5s 轮询一次，N 张卡 = N 次 IPC/5s 的空转。
+    enabled: (options?.enabled ?? true) && !!providerId && !!appType,
     refetchInterval: 5000, // 每 5 秒刷新一次
     retry: false,
   });
