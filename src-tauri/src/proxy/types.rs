@@ -247,6 +247,51 @@ impl Default for RectifierConfig {
     }
 }
 
+/// 隐私过滤配置
+///
+/// 存储在 settings 表中，key = "privacy_filter_config"。
+/// 进程内正则脱敏：在代理转发前，对请求体文本字段中的 PII / 密钥打码（mask）。
+/// best-effort：检测为纯函数，失败也不阻断请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivacyFilterConfig {
+    /// 总开关：是否启用隐私过滤（默认关闭）
+    #[serde(default)]
+    pub enabled: bool,
+    /// 邮箱地址 → [邮箱]
+    #[serde(default = "default_true")]
+    pub email: bool,
+    /// 手机号（中国大陆） → [电话]
+    #[serde(default = "default_true")]
+    pub phone: bool,
+    /// 身份证号（18 位） → [身份证]
+    #[serde(default = "default_true")]
+    pub id_card: bool,
+    /// 银行卡号（Luhn 校验） → [银行卡]
+    #[serde(default = "default_true")]
+    pub bank_card: bool,
+    /// IP 地址（IPv4） → [IP]
+    #[serde(default = "default_true")]
+    pub ip: bool,
+    /// API 密钥 / 凭证 / 高熵 Token → [密钥]
+    #[serde(default = "default_true")]
+    pub secret: bool,
+}
+
+impl Default for PrivacyFilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            email: true,
+            phone: true,
+            id_card: true,
+            bank_card: true,
+            ip: true,
+            secret: true,
+        }
+    }
+}
+
 /// 请求优化器配置
 ///
 /// 存储在 settings 表中，key = "optimizer_config"

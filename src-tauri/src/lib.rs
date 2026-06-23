@@ -19,6 +19,7 @@ mod linux_fix;
 mod mcp;
 mod opencode_config;
 mod panic_hook;
+mod privacy_filter;
 mod prompt;
 mod prompt_files;
 mod provider;
@@ -1146,6 +1147,9 @@ pub fn run() {
             commands::set_optimizer_config,
             commands::get_log_config,
             commands::set_log_config,
+            commands::get_privacy_filter_config,
+            commands::set_privacy_filter_config,
+            commands::test_privacy_filter,
             commands::restart_app,
             commands::copy_text_to_clipboard,
             commands::get_claude_plugin_status,

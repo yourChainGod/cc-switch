@@ -18,7 +18,7 @@ use super::{
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
-    types::{OptimizerConfig, ProxyStatus, RectifierConfig},
+    types::{OptimizerConfig, PrivacyFilterConfig, ProxyStatus, RectifierConfig},
     ProxyError,
 };
 use crate::{app_config::AppType, provider::Provider};
@@ -108,6 +108,8 @@ pub struct RequestForwarder {
     optimizer_config: OptimizerConfig,
     /// 路由层模型映射配置（按客户端区分的 from→to 映射，命中即为最终上游模型）
     model_routing: super::model_routing::ModelRoutingConfig,
+    /// 隐私过滤配置（进程内 PII / 密钥脱敏）
+    privacy_filter_config: PrivacyFilterConfig,
     /// 非流式请求超时（秒）
     non_streaming_timeout: std::time::Duration,
     /// 流式请求响应头等待超时（秒）
@@ -151,6 +153,17 @@ impl RequestForwarder {
         replaced_images
     }
 
+    /// 隐私过滤（进程内 PII/密钥 mask，best-effort）。
+    ///
+    /// 受总开关 `privacy_filter_config.enabled` 管辖；关闭时返回 0 且不改动 body。
+    /// 命中即就地脱敏，返回被脱敏的敏感片段数量。
+    fn apply_privacy_filter(&self, body: &mut Value) -> usize {
+        if !self.privacy_filter_config.enabled {
+            return 0;
+        }
+        super::privacy_filter::apply(body, &self.privacy_filter_config)
+    }
+
     /// 反应式 media 重试判定：上游因图片输入报错后，是否应替换图片块并对同一供应商重试一次。
     ///
     /// 受 `enabled && request_media_fallback` 管辖；不涉及 `request_media_heuristic`——
@@ -188,6 +201,7 @@ impl RequestForwarder {
         rectifier_config: RectifierConfig,
         optimizer_config: OptimizerConfig,
         model_routing: super::model_routing::ModelRoutingConfig,
+        privacy_filter_config: PrivacyFilterConfig,
         max_retries: u32,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
@@ -207,6 +221,7 @@ impl RequestForwarder {
             rectifier_config,
             optimizer_config,
             model_routing,
+            privacy_filter_config,
             non_streaming_timeout: std::time::Duration::from_secs(non_streaming_timeout),
             streaming_first_byte_timeout: std::time::Duration::from_secs(
                 streaming_first_byte_timeout,
@@ -739,7 +754,7 @@ impl RequestForwarder {
                     });
                 }
                 Err(mut e) => {
-                    // anyrouter 429/503 特判：同通道高强度重试，预算独立于
+                    // anyrouter 429/500/503 特判：同通道高强度重试，预算独立于
                     // AppProxyConfig.max_retries（该设置只管"换几家"，不管这里）。
                     // 重试间隔尊重上游 Retry-After（封顶），否则短退避线性爬升。
                     // anyrouter 限流/不可用是分钟级窗口 + 后端轮转，冷却/熔断只会把
@@ -764,7 +779,7 @@ impl RequestForwarder {
                             };
                             if wait_ms > anyrouter_429_wait_budget_ms {
                                 log::warn!(
-                                    "[{app_type_str}] [anyrouter] 429/503 重试等待预算耗尽，转入故障转移: provider={}",
+                                    "[{app_type_str}] [anyrouter] 429/500/503 重试等待预算耗尽，转入故障转移: provider={}",
                                     provider.name
                                 );
                                 break;
@@ -773,7 +788,7 @@ impl RequestForwarder {
                             anyrouter_429_retry_budget -= 1;
                             retry_round += 1;
                             log::info!(
-                                "[{app_type_str}] [anyrouter] 上游 429/503，{wait_ms}ms 后同通道重试（第 {retry_round} 次，剩余预算 {anyrouter_429_retry_budget}）: provider={}",
+                                "[{app_type_str}] [anyrouter] 上游 429/500/503，{wait_ms}ms 后同通道重试（第 {retry_round} 次，剩余预算 {anyrouter_429_retry_budget}）: provider={}",
                                 provider.name
                             );
                             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
@@ -793,7 +808,7 @@ impl RequestForwarder {
                             {
                                 Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!(
-                                        "[{app_type_str}] [anyrouter] 429/503 重试成功（共重试 {retry_round} 次）: provider={}",
+                                        "[{app_type_str}] [anyrouter] 429/500/503 重试成功（共重试 {retry_round} 次）: provider={}",
                                         provider.name
                                     );
                                     return Ok(self
@@ -814,7 +829,7 @@ impl RequestForwarder {
                                 }
                             }
                         }
-                        // 仍是 429/503：落入下方通用分类，但不标记冷却（见
+                        // 仍是 429/500/503：落入下方通用分类，但不标记冷却（见
                         // skip_failure_marking）；变成其他错误则按正常轨道处理。
                     }
 
@@ -1341,7 +1356,7 @@ impl RequestForwarder {
                     //    不应污染熔断器和数据库健康度（与 release_permit_neutral 同语义）。
                     let category = self.categorize_proxy_error(&e);
                     let key_scoped_retry = key_id.is_some() && is_key_scoped_error(&e);
-                    // anyrouter 429/503：限流/不可用不是通道/key 故障，不计入冷却与熔断健康度，
+                    // anyrouter 429/500/503：限流/不可用不是通道/key 故障，不计入冷却与熔断健康度，
                     // 也不清除亲和（下一请求应继续优先命中该通道）。
                     let skip_failure_marking = is_anyrouter && is_transient_upstream_error(&e);
 
@@ -1360,7 +1375,7 @@ impl RequestForwarder {
                                 .await;
                             if skip_failure_marking {
                                 log::info!(
-                                    "[{app_type_str}] [anyrouter] 429/503 不计入 key 冷却: provider={}, key_id={key_id:?}",
+                                    "[{app_type_str}] [anyrouter] 429/500/503 不计入 key 冷却: provider={}, key_id={key_id:?}",
                                     provider.name
                                 );
                             } else {
@@ -1387,7 +1402,7 @@ impl RequestForwarder {
                             //（anyrouter 429 例外：限流不是通道故障，仅中性释放 permit）
                             if skip_failure_marking {
                                 log::info!(
-                                    "[{app_type_str}] [anyrouter] 429/503 不计入通道冷却/熔断: provider={}",
+                                    "[{app_type_str}] [anyrouter] 429/500/503 不计入通道冷却/熔断: provider={}",
                                     provider.name
                                 );
                                 self.router
@@ -1732,7 +1747,16 @@ impl RequestForwarder {
 
         // 过滤私有参数（以 `_` 开头的字段），防止内部信息泄露到上游
         // 默认使用空白名单，过滤所有 _ 前缀字段
-        let filtered_body = prepare_upstream_request_body(request_body);
+        let mut filtered_body = prepare_upstream_request_body(request_body);
+        // 隐私过滤（进程内 PII/密钥 mask，best-effort，命中即就地脱敏，永不阻断请求）
+        let redacted = self.apply_privacy_filter(&mut filtered_body);
+        if redacted > 0 {
+            log::info!(
+                "[{}] Privacy filter: {} sensitive item(s) redacted",
+                app_type.as_str(),
+                redacted
+            );
+        }
         if let Some(model) = filtered_body
             .get("model")
             .and_then(|m| m.as_str())
@@ -2659,9 +2683,9 @@ const ANYROUTER_KNOWN_HOSTS: &[&str] = &["anyrouter.top", "a-ocnfniawgw.cn-shang
 /// anyrouter 要求显式携带的 1M 上下文 beta flag（ccLoad 同款适配）。
 const ANYROUTER_CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
-/// anyrouter 429/503 的同通道重试预算（每个客户端请求共享，跨 key 计数）。
+/// anyrouter 429/500/503 的同通道重试预算（每个客户端请求共享，跨 key 计数）。
 ///
-/// anyrouter 的 429/503 来自分钟级滚动窗口 + 后端账号轮转，稍候重试大概率
+/// anyrouter 的 429/500/503 来自分钟级滚动窗口 + 后端账号轮转，稍候重试大概率
 /// 落到可用后端，因此预算刻意不受 AppProxyConfig.max_retries 约束、给足量；
 /// 同时不计入 key/通道冷却与熔断健康度（见 forward_with_retry_inner）。
 const ANYROUTER_RATE_LIMIT_MAX_RETRIES: usize = 50;
@@ -2674,11 +2698,11 @@ const ANYROUTER_RATE_LIMIT_RETRY_AFTER_CAP_SECS: u64 = 30;
 /// 防止上游持续回大 Retry-After 时把单个请求挂死。
 const ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS: u64 = 120_000;
 
-/// 上游“稍后重试”类错误（anyrouter 特判用）：429 限流 + 503 不可用。
-/// anyrouter 后端分钟级轮转，二者大概率稍候即恢复，故都按瞬时可重试处理
+/// 上游“稍后重试”类错误（anyrouter 特判用）：429 限流 + 500/503（高负载临时错误）。
+/// anyrouter 后端分钟级轮转，这些大概率稍候即恢复，故都按瞬时可重试处理
 /// （同通道重试 + 不计入 key/通道冷却与熔断健康度）。
 fn is_transient_upstream_error(error: &ProxyError) -> bool {
-    matches!(error, ProxyError::UpstreamError { status: 429 | 503, .. })
+    matches!(error, ProxyError::UpstreamError { status: 429 | 500 | 503, .. })
 }
 
 fn is_anyrouter_channel(provider_name: &str, base_url: &str) -> bool {
@@ -3017,12 +3041,12 @@ mod tests {
     }
 
     #[test]
-    fn transient_upstream_error_matches_429_and_503_only() {
-        // anyrouter 同通道重试 + 不标记冷却的触发条件：429 限流 / 503 不可用。
+    fn transient_upstream_error_matches_429_500_503() {
+        // anyrouter 同通道重试 + 不标记冷却的触发条件：429 限流 / 500、503 高负载临时错误。
         assert!(is_transient_upstream_error(&upstream_error(429, None, None)));
+        assert!(is_transient_upstream_error(&upstream_error(500, None, None)));
         assert!(is_transient_upstream_error(&upstream_error(503, None, None)));
-        // 相邻的 5xx 与客户端错误不在此列。
-        assert!(!is_transient_upstream_error(&upstream_error(500, None, None)));
+        // 其余 5xx 与客户端错误不在此列。
         assert!(!is_transient_upstream_error(&upstream_error(502, None, None)));
         assert!(!is_transient_upstream_error(&upstream_error(400, None, None)));
         assert!(!is_transient_upstream_error(&upstream_error(200, None, None)));
@@ -3255,6 +3279,7 @@ mod tests {
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             model_routing: crate::proxy::model_routing::ModelRoutingConfig::default(),
+            privacy_filter_config: PrivacyFilterConfig::default(),
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
@@ -5181,6 +5206,42 @@ mod tests {
         let mut fwd = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
         fwd.rectifier_config = config;
         fwd
+    }
+
+    fn forwarder_with_privacy(config: PrivacyFilterConfig) -> RequestForwarder {
+        let mut fwd = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
+        fwd.privacy_filter_config = config;
+        fwd
+    }
+
+    #[test]
+    fn privacy_filter_redacts_when_enabled() {
+        let fwd = forwarder_with_privacy(PrivacyFilterConfig {
+            enabled: true,
+            ..PrivacyFilterConfig::default()
+        });
+        let mut body = json!({
+            "messages": [{"role": "user", "content": "邮箱 a@b.com 手机 13800138000"}]
+        });
+        let n = fwd.apply_privacy_filter(&mut body);
+        assert_eq!(n, 2);
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!("邮箱 [邮箱] 手机 [电话]")
+        );
+    }
+
+    #[test]
+    fn privacy_filter_noop_when_disabled() {
+        // 默认 enabled=false：gate 关闭，不改体、返回 0。
+        let fwd = forwarder_with_privacy(PrivacyFilterConfig::default());
+        let mut body = json!({
+            "messages": [{"role": "user", "content": "邮箱 a@b.com"}]
+        });
+        let before = body.clone();
+        let n = fwd.apply_privacy_filter(&mut body);
+        assert_eq!(n, 0);
+        assert_eq!(body, before);
     }
 
     fn provider_with_settings(settings_config: Value) -> Provider {

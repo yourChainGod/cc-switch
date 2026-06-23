@@ -9,7 +9,7 @@ use crate::proxy::{
     forwarder::RequestForwarder,
     provider_router::ProviderAttempt,
     server::ProxyState,
-    types::{AppProxyConfig, OptimizerConfig, RectifierConfig},
+    types::{AppProxyConfig, OptimizerConfig, PrivacyFilterConfig, RectifierConfig},
     ProxyError,
 };
 use axum::http::HeaderMap;
@@ -70,6 +70,8 @@ pub struct RequestContext {
     pub optimizer_config: OptimizerConfig,
     /// 路由层模型映射配置
     pub model_routing: super::model_routing::ModelRoutingConfig,
+    /// 隐私过滤配置（进程内 PII / 密钥脱敏）
+    pub privacy_filter_config: PrivacyFilterConfig,
 }
 
 impl RequestContext {
@@ -106,6 +108,7 @@ impl RequestContext {
         let rectifier_config = state.db.get_rectifier_config().unwrap_or_default();
         let optimizer_config = state.db.get_optimizer_config().unwrap_or_default();
         let model_routing = state.db.get_model_routing_config().unwrap_or_default();
+        let privacy_filter_config = state.db.get_privacy_filter_config().unwrap_or_default();
 
         let current_provider_id =
             crate::settings::get_current_provider(&app_type).unwrap_or_default();
@@ -188,6 +191,7 @@ impl RequestContext {
             rectifier_config,
             optimizer_config,
             model_routing,
+            privacy_filter_config,
         })
     }
 
@@ -255,6 +259,7 @@ impl RequestContext {
             self.rectifier_config.clone(),
             self.optimizer_config.clone(),
             self.model_routing.clone(),
+            self.privacy_filter_config.clone(),
             max_retries,
         )
     }

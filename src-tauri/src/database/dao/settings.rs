@@ -324,4 +324,29 @@ impl Database {
             .map_err(|e| AppError::Database(format!("序列化日志配置失败: {e}")))?;
         self.set_setting("log_config", &json)
     }
+
+    // --- 隐私过滤配置 ---
+
+    /// 获取隐私过滤配置
+    ///
+    /// 不存在时返回默认值（总开关关闭，各分类默认开启）。
+    pub fn get_privacy_filter_config(
+        &self,
+    ) -> Result<crate::proxy::types::PrivacyFilterConfig, AppError> {
+        match self.get_setting("privacy_filter_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析隐私过滤配置失败: {e}"))),
+            None => Ok(crate::proxy::types::PrivacyFilterConfig::default()),
+        }
+    }
+
+    /// 更新隐私过滤配置
+    pub fn set_privacy_filter_config(
+        &self,
+        config: &crate::proxy::types::PrivacyFilterConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化隐私过滤配置失败: {e}")))?;
+        self.set_setting("privacy_filter_config", &json)
+    }
 }
