@@ -173,7 +173,6 @@ export function EditProviderDialog({
         return;
       }
 
-
       try {
         const currentId = await providersApi.getCurrent(appId);
         if (currentId && provider.id === currentId) {
@@ -469,7 +468,7 @@ export function EditProviderDialog({
           name: `Key ${providerKeys.length + index + 1}`,
           keyValue: value,
           enabled: true,
-          priority: providerKeys.length + index,
+          priority: 0,
           weight: 1,
         });
         created.push(key);

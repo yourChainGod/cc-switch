@@ -487,6 +487,11 @@ impl Database {
                         Self::migrate_v17_to_v18(conn)?;
                         Self::set_user_version(conn, 18)?;
                     }
+                    18 => {
+                        log::info!("迁移数据库从 v18 到 v19（归一化历史批量 Key 优先级）");
+                        Self::migrate_v18_to_v19(conn)?;
+                        Self::set_user_version(conn, 19)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -1324,6 +1329,42 @@ impl Database {
         log::info!(
             "v17 -> v18 迁移完成：proxy_request_logs 已添加 decision_trace / upstream_error_body"
         );
+        Ok(())
+    }
+
+    fn migrate_v18_to_v19(conn: &Connection) -> Result<(), AppError> {
+        Self::normalize_generated_provider_key_priorities(conn)?;
+        log::info!("v18 -> v19 迁移完成：历史批量导入 Key 的连续优先级已归零");
+        Ok(())
+    }
+
+    fn normalize_generated_provider_key_priorities(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "provider_keys")? {
+            return Ok(());
+        }
+
+        conn.execute(
+            "WITH dense_priority_groups AS (
+                SELECT app_type, provider_id
+                FROM provider_keys
+                GROUP BY app_type, provider_id
+                HAVING COUNT(*) >= 2
+                   AND COUNT(DISTINCT priority) = COUNT(*)
+                   AND MAX(priority) - MIN(priority) = COUNT(*) - 1
+            )
+            UPDATE provider_keys
+               SET priority = 0,
+                   updated_at = strftime('%s', 'now')
+             WHERE EXISTS (
+                SELECT 1
+                  FROM dense_priority_groups g
+                 WHERE g.app_type = provider_keys.app_type
+                   AND g.provider_id = provider_keys.provider_id
+             )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("归一化 provider_keys 优先级失败: {e}")))?;
+
         Ok(())
     }
 

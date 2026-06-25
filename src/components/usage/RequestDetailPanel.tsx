@@ -124,6 +124,16 @@ function statusCodeBadgeClass(statusCode: number) {
   return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300";
 }
 
+function retryKindBadgeClass(kind: string) {
+  if (kind.startsWith("rectifier")) {
+    return "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-900/60 dark:bg-violet-950/35 dark:text-violet-300";
+  }
+  if (kind === "media") {
+    return "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900/60 dark:bg-cyan-950/35 dark:text-cyan-300";
+  }
+  return "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300";
+}
+
 interface MetricTileProps {
   icon: ReactNode;
   label: string;
@@ -439,6 +449,29 @@ export function RequestDetailPanel({
     }
   };
   const requestKeyInfo = getKeyInfo(request.providerId, request.providerKeyId);
+  const retryKindLabel = (kind?: string) => {
+    switch (kind) {
+      case "anyrouter":
+      case "anyrouter_codex":
+        return t("usage.retryKind.sameChannel", {
+          defaultValue: "同通道重试",
+        });
+      case "media":
+        return t("usage.retryKind.media", {
+          defaultValue: "媒体重试",
+        });
+      case "rectifier":
+        return t("usage.retryKind.rectifier", {
+          defaultValue: "请求整流",
+        });
+      case "rectifier_budget":
+        return t("usage.retryKind.rectifierBudget", {
+          defaultValue: "整流预算",
+        });
+      default:
+        return null;
+    }
+  };
 
   return (
     <RequestDetailFrame
@@ -748,6 +781,7 @@ export function RequestDetailPanel({
               <ol className="relative space-y-3 before:absolute before:left-3 before:top-4 before:h-[calc(100%-2rem)] before:w-px before:bg-border/70">
                 {steps.map((step, idx) => {
                   const stepKeyInfo = getKeyInfo(step.providerId, step.keyId);
+                  const retryLabel = retryKindLabel(step.retryKind);
                   return (
                     <li
                       key={`${step.index}-${step.providerId}-${idx}`}
@@ -796,9 +830,10 @@ export function RequestDetailPanel({
                             )}
                           </div>
                           {(stepKeyInfo ||
-                            step.retryKind ||
-                            step.isFailoverSwitch) && (
-                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            retryLabel ||
+                            step.isFailoverSwitch ||
+                            step.error) && (
+                            <Collapsible className="flex min-w-0 flex-wrap items-center gap-2">
                               {stepKeyInfo && (
                                 <KeyBadge
                                   label={stepKeyInfo.label}
@@ -807,14 +842,14 @@ export function RequestDetailPanel({
                                   muted={!stepKeyInfo.resolved}
                                 />
                               )}
-                              {step.retryKind && (
+                              {retryLabel && step.retryKind && (
                                 <span
                                   className={cn(
                                     diagnosticPillClass,
-                                    "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300",
+                                    retryKindBadgeClass(step.retryKind),
                                   )}
                                 >
-                                  {step.retryKind}
+                                  {retryLabel}
                                 </span>
                               )}
                               {step.isFailoverSwitch && (
@@ -827,24 +862,29 @@ export function RequestDetailPanel({
                                   {t("usage.failoverSwitch", "故障转移切换")}
                                 </span>
                               )}
-                            </div>
+                              {step.error && (
+                                <>
+                                  <CollapsibleTrigger
+                                    className={cn(
+                                      diagnosticPillClass,
+                                      "group h-7 gap-1.5 rounded-lg border-rose-200 bg-rose-50 text-rose-700 transition-colors hover:border-rose-300 hover:bg-rose-100 hover:text-rose-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:border-rose-900/60 dark:bg-rose-950/35 dark:text-rose-200/90 dark:hover:border-rose-800 dark:hover:bg-rose-950/55 dark:hover:text-rose-100",
+                                    )}
+                                  >
+                                    <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+                                    {t("usage.errorDetail", {
+                                      defaultValue: "错误详情",
+                                    })}
+                                  </CollapsibleTrigger>
+                                  <CollapsibleContent className="basis-full min-w-0 pt-1">
+                                    <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-md border border-rose-200/60 bg-rose-50/45 px-2.5 py-2 font-mono text-xs leading-5 text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/20 dark:text-rose-200/90">
+                                      {step.error}
+                                    </pre>
+                                  </CollapsibleContent>
+                                </>
+                              )}
+                            </Collapsible>
                           )}
                         </div>
-                        {step.error && (
-                          <Collapsible className="mt-2 rounded-md border border-rose-200/70 bg-rose-50/60 dark:border-rose-900/50 dark:bg-rose-950/25">
-                            <CollapsibleTrigger className="group flex w-full items-center gap-1.5 px-2.5 py-2 text-left text-xs font-medium text-rose-700 outline-none transition-colors hover:text-rose-800 focus-visible:ring-2 focus-visible:ring-ring dark:text-rose-200/90 dark:hover:text-rose-100">
-                              <ChevronRight className="h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-90" />
-                              {t("usage.errorDetail", {
-                                defaultValue: "错误详情",
-                              })}
-                            </CollapsibleTrigger>
-                            <CollapsibleContent>
-                              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words border-t border-rose-200/60 bg-background/70 px-2.5 py-2 font-mono text-xs leading-5 text-rose-700 dark:border-rose-900/50 dark:bg-background/40 dark:text-rose-200/90">
-                                {step.error}
-                              </pre>
-                            </CollapsibleContent>
-                          </Collapsible>
-                        )}
                       </div>
                     </li>
                   );

@@ -91,7 +91,7 @@ export function useProviderActions(
               name: `Key ${index + 1}`,
               keyValue,
               enabled: true,
-              priority: index,
+              priority: 0,
               weight: 1,
             });
             seededKeys.push(key);

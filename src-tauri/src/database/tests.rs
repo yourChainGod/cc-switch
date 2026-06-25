@@ -332,6 +332,73 @@ fn schema_migration_v14_moves_config_key_binding_out_of_provider_meta() {
 }
 
 #[test]
+fn schema_migration_v19_resets_generated_dense_key_priorities() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    for provider_id in ["dense", "manual", "two_key"] {
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta)
+             VALUES (?1, 'claude', ?1, '{}', '{}')",
+            params![provider_id],
+        )
+        .expect("insert provider");
+    }
+
+    let insert_key = |provider_id: &str, suffix: i64, priority: i64| {
+        conn.execute(
+            "INSERT INTO provider_keys (
+                id, app_type, provider_id, name, key_value, enabled,
+                priority, weight, status, consecutive_failures, created_at, updated_at
+             )
+             VALUES (?1, 'claude', ?2, ?1, ?3, 1, ?4, 1, 'active', 0, 1, 1)",
+            params![
+                format!("{provider_id}-{suffix}"),
+                provider_id,
+                format!("sk-{provider_id}-{suffix}"),
+                priority
+            ],
+        )
+        .expect("insert provider key");
+    };
+
+    for (suffix, priority) in [0, 1, 2, 3].into_iter().enumerate() {
+        insert_key("dense", suffix as i64, priority);
+    }
+    for (suffix, priority) in [10, 20, 30].into_iter().enumerate() {
+        insert_key("manual", suffix as i64, priority);
+    }
+    for (suffix, priority) in [0, 1].into_iter().enumerate() {
+        insert_key("two_key", suffix as i64, priority);
+    }
+
+    Database::set_user_version(&conn, 18).expect("set user_version=18");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let priorities_for = |provider_id: &str| -> Vec<i64> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT priority FROM provider_keys
+                 WHERE app_type = 'claude' AND provider_id = ?1
+                 ORDER BY id",
+            )
+            .expect("prepare priorities");
+        stmt.query_map(params![provider_id], |row| row.get::<_, i64>(0))
+            .expect("query priorities")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect priorities")
+    };
+
+    assert_eq!(priorities_for("dense"), vec![0, 0, 0, 0]);
+    assert_eq!(priorities_for("manual"), vec![10, 20, 30]);
+    assert_eq!(priorities_for("two_key"), vec![0, 0]);
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn schema_create_tables_include_pricing_model_columns() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");
