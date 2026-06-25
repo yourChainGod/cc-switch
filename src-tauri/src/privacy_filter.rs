@@ -61,9 +61,13 @@ static RE_JWT: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// 常见密钥前缀：OpenAI / GitHub / AWS / Google / Slack。
+///
+/// 每个分支前加 `\b` 左边界：否则 `sk-[…]{16,}` 会把英文里以 `sk-` 收尾的连字符
+/// 短语吞掉（`task-management-…` / `risk-assessment-…` / `disk-usage-…`）。加边界后
+/// 这类词中嵌套不再命中，而真实 key（前面是空格/引号/`=`/行首）仍正常匹配。
 static RE_TOKEN_PREFIX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?:sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_\-]{35}|xox[baprs]-[A-Za-z0-9\-]{10,})",
+        r"(?:\bsk-[A-Za-z0-9_\-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}|\bAIza[0-9A-Za-z_\-]{35}|\bxox[baprs]-[A-Za-z0-9\-]{10,})",
     )
     .unwrap()
 });
@@ -80,9 +84,15 @@ static RE_SECRET_KV: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
-/// 高熵兜底候选：长度 ≥ 20 的 base64/token 字符集连续串（实际是否脱敏由熵+字符集判定）。
+/// 高熵兜底候选：长度 ≥ 20 的 token 字符集连续串（实际是否脱敏由熵+字符集判定）。
+///
+/// 字符集刻意**不含** `/ + =`：含 `/` 会把整条文件路径（`/Users/a8888/Documents/...`）
+/// 当成单个 token，因混合字符熵偏高而被误判为密钥。剔除后路径会被 `/` 切成
+/// 短目录段（各自 <20 或纯字母/纯数字），不再误伤；真正的随机密钥（URL-safe
+/// base64 / token 用的就是 `A-Za-z0-9_-`）仍能命中。代价：含 `/` 的标准 base64
+/// 裸串（如 AWS secret）兜底会漏，但这类通常带 `xxx=` 键名前缀，由 RE_SECRET_KV 接住。
 static RE_TOKEN_CANDIDATE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[A-Za-z0-9_\-+/=]{20,}").unwrap());
+    Lazy::new(|| Regex::new(r"[A-Za-z0-9_-]{20,}").unwrap());
 
 // --- 校验辅助 ---
 
@@ -141,18 +151,30 @@ fn shannon_entropy(s: &str) -> f64 {
         .sum()
 }
 
-/// 判断一个候选 token 是否像密钥：长度 ≥ 20、字母数字混合、熵 ≥ 3.5。
-/// 纯字母（如长驼峰标识符）或纯重复字符会被排除，降低误报。
+/// 判断一个候选 token 是否像密钥。
+///
+/// 熵判定作用在「按 `-`/`_` 切分后**最长的连续字母数字子段**」上，而非整串：
+/// 连字符短语 / slug（`risk-assessment-framework-2024`、`my-awesome-project-v3`）
+/// 切开后每段都是短单词或纯数字，最长子段不够长而落选；无分隔的随机密钥子段
+/// 仍然够长够乱，正常命中。子段需 ≥16、字母数字混合、香农熵 ≥ 3.5。
 fn is_high_entropy_secret(tok: &str) -> bool {
     if tok.len() < 20 {
         return false;
     }
-    let has_alpha = tok.chars().any(|c| c.is_ascii_alphabetic());
-    let has_digit = tok.chars().any(|c| c.is_ascii_digit());
+    // tok 来自 `[A-Za-z0-9_-]{20,}`，分隔符只会是 `_` / `-`。
+    let seg = tok
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .max_by_key(|s| s.len())
+        .unwrap_or("");
+    if seg.len() < 16 {
+        return false;
+    }
+    let has_alpha = seg.chars().any(|c| c.is_ascii_alphabetic());
+    let has_digit = seg.chars().any(|c| c.is_ascii_digit());
     if !(has_alpha && has_digit) {
         return false;
     }
-    shannon_entropy(tok) >= 3.5
+    shannon_entropy(seg) >= 3.5
 }
 
 // --- 替换辅助 ---
@@ -325,6 +347,23 @@ mod tests {
     }
 
     #[test]
+    fn secret_prefix_not_matched_mid_word() {
+        // `sk-` 嵌在 task-/risk-/disk- 这类连字符短语中不应命中。
+        for s in [
+            "task-management-system-implementation",
+            "risk-assessment-framework-2024",
+            "disk-usage-monitoring-dashboard-v2",
+        ] {
+            let out = redact_text(&format!("模块 {s} 已就绪"), &cfg_all());
+            assert!(!out.redacted.contains("[密钥]"), "false positive on: {s} -> {}", out.redacted);
+            assert!(out.redacted.contains(s), "mangled: {}", out.redacted);
+        }
+        // 独立出现的真实 key 仍应命中。
+        let real = redact_text("export KEY=sk-abcdefghijklmnopqrstuvwxyz here", &cfg_all());
+        assert!(real.redacted.contains("[密钥]"), "should match real key: {}", real.redacted);
+    }
+
+    #[test]
     fn secret_kv_preserves_key() {
         let out = redact_text("password: hunter2supersecret", &cfg_all());
         assert!(out.redacted.starts_with("password:"));
@@ -342,11 +381,48 @@ mod tests {
     }
 
     #[test]
+    fn hyphenated_slugs_not_treated_as_secret() {
+        // 含数字的连字符短语 / slug 不应被高熵兜底误判（熵判定走最长子段）。
+        for s in [
+            "risk-assessment-framework-2024",
+            "disk-usage-monitoring-dashboard-v2",
+            "my-awesome-project-v3-final",
+            "feature-user-auth-refactor-2024",
+        ] {
+            let out = redact_text(&format!("分支 {s} 合并", ), &cfg_all());
+            assert_eq!(out.count, 0, "slug misclassified: {s} -> {}", out.redacted);
+            assert!(out.redacted.contains(s), "slug mangled: {}", out.redacted);
+        }
+    }
+
+    #[test]
     fn respects_disabled_categories() {
         let mut cfg = cfg_all();
         cfg.email = false;
         let out = redact_text("邮箱 a@b.com 手机 13800138000", &cfg);
         assert!(out.redacted.contains("a@b.com"));
         assert!(out.redacted.contains("[电话]"));
+    }
+
+    #[test]
+    fn file_paths_not_treated_as_secret() {
+        // 高熵兜底不应把文件路径误判为密钥（字符集已剔除 `/`）。
+        for p in [
+            "/Users/a8888/Documents/gateway/cc-switch/src-tauri",
+            "/home/user/projects/my-app-2024/node_modules/react-dom/index.js",
+            "C:/Users/admin/AppData/Local/Temp/build123",
+            "src/components/settings/PrivacyFilterSettings.tsx",
+        ] {
+            let out = redact_text(&format!("打开文件 {p} 看看"), &cfg_all());
+            assert_eq!(out.count, 0, "path misclassified as secret: {p} -> {}", out.redacted);
+            assert!(out.redacted.contains(p), "path mangled: {}", out.redacted);
+        }
+    }
+
+    #[test]
+    fn urlsafe_random_token_still_redacted() {
+        // 收窄字符集后，URL-safe base64 / 混合随机串仍应命中兜底。
+        let out = redact_text("token dGhpcyBpcyBhIHNlY3JldCB0b2tlbjEyMzQ1Ng here", &cfg_all());
+        assert!(out.redacted.contains("[密钥]"), "got: {}", out.redacted);
     }
 }
