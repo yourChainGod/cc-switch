@@ -224,6 +224,42 @@ export function ProviderList({
     },
   });
 
+  const {
+    mutate: resetAllKeyCooldowns,
+    isPending: isResettingAnyKeyCooldowns,
+    variables: resettingKeyProviderId,
+  } = useMutation({
+    mutationFn: async (providerId: string) => {
+      return providersApi.resetAllKeysHealth(appId, providerId);
+    },
+    onSuccess: async (count) => {
+      await queryClient.invalidateQueries({
+        queryKey: ["providerKeySummaries", appId],
+      });
+      toast.success(
+        t("providerKeys.resetAllDone", {
+          count,
+          defaultValue: "Reset health state for {{count}} keys",
+        }),
+      );
+    },
+    onError: (error: Error) => {
+      console.error("Failed to reset provider keys:", error);
+      toast.error(
+        t("providerKeys.resetFailed", {
+          defaultValue: "Failed to reset provider key",
+        }),
+      );
+    },
+  });
+
+  const handleResetAllKeyCooldowns = useCallback(
+    (provider: Provider) => {
+      resetAllKeyCooldowns(provider.id);
+    },
+    [resetAllKeyCooldowns],
+  );
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
@@ -335,6 +371,11 @@ export function ProviderList({
                 failoverPriority={getFailoverPriority(provider.id)}
                 isInFailoverQueue={isInFailoverQueue(provider.id)}
                 keySummary={providerKeySummaryMap.get(provider.id)}
+                onResetAllKeyCooldowns={handleResetAllKeyCooldowns}
+                isResettingKeyCooldowns={
+                  isResettingAnyKeyCooldowns &&
+                  resettingKeyProviderId === provider.id
+                }
                 onToggleFailover={handleToggleFailover}
                 activeProviderId={activeProviderId}
               />
@@ -461,6 +502,8 @@ interface SortableProviderCardProps {
   failoverPriority?: number;
   isInFailoverQueue: boolean;
   keySummary?: ProviderKeySummary;
+  onResetAllKeyCooldowns: (provider: Provider) => void;
+  isResettingKeyCooldowns: boolean;
   onToggleFailover: (providerId: string, enabled: boolean) => void;
   activeProviderId?: string;
 }
@@ -489,6 +532,8 @@ function SortableProviderCard({
   failoverPriority,
   isInFailoverQueue,
   keySummary,
+  onResetAllKeyCooldowns,
+  isResettingKeyCooldowns,
   onToggleFailover,
   activeProviderId,
 }: SortableProviderCardProps) {
@@ -545,6 +590,8 @@ function SortableProviderCard({
         failoverPriority={failoverPriority}
         isInFailoverQueue={isInFailoverQueue}
         keySummary={keySummary}
+        onResetAllKeyCooldowns={onResetAllKeyCooldowns}
+        isResettingKeyCooldowns={isResettingKeyCooldowns}
         onToggleFailover={handleToggleFailover}
         activeProviderId={activeProviderId}
       />

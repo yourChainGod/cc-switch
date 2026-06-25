@@ -1,5 +1,11 @@
 import { memo, useMemo, useState, useEffect } from "react";
-import { GripVertical, ChevronDown, ChevronUp, Route } from "lucide-react";
+import {
+  GripVertical,
+  ChevronDown,
+  ChevronUp,
+  Route,
+  TimerOff,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   DraggableAttributes,
@@ -59,6 +65,8 @@ interface ProviderCardProps {
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
   keySummary?: ProviderKeySummary;
+  onResetAllKeyCooldowns?: (provider: Provider) => void;
+  isResettingKeyCooldowns?: boolean;
 }
 
 /** 判断是否为官方供应商（无自定义 base URL / API key，直连官方 API） */
@@ -155,6 +163,8 @@ function ProviderCardImpl({
   onToggleFailover,
   activeProviderId,
   keySummary,
+  onResetAllKeyCooldowns,
+  isResettingKeyCooldowns = false,
 }: ProviderCardProps) {
   const { t } = useTranslation();
 
@@ -247,6 +257,9 @@ function ProviderCardImpl({
   const keyIssueCount = keySummary
     ? keySummary.degraded + keySummary.cooldown + keySummary.disabled
     : 0;
+  const resetAllKeyCooldownsLabel = t("providerKeys.resetAll", {
+    defaultValue: "Clear all cooldowns",
+  });
 
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -446,7 +459,7 @@ function ProviderCardImpl({
               {hasKeyPool && keySummary && (
                 <span
                   className={cn(
-                    "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold",
+                    "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold",
                     keyIssueCount > 0
                       ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
                       : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
@@ -473,6 +486,27 @@ function ProviderCardImpl({
                         available: keySummary.available,
                         defaultValue: "Key {{available}}/{{total}}",
                       })}
+                  {onResetAllKeyCooldowns && (
+                    <button
+                      type="button"
+                      onClick={() => onResetAllKeyCooldowns(provider)}
+                      disabled={isResettingKeyCooldowns}
+                      aria-label={resetAllKeyCooldownsLabel}
+                      title={resetAllKeyCooldownsLabel}
+                      className={cn(
+                        "-mr-0.5 rounded p-0.5 transition-colors",
+                        "text-current opacity-70 hover:bg-current/10 hover:opacity-100",
+                        "disabled:pointer-events-none disabled:opacity-40",
+                      )}
+                    >
+                      <TimerOff
+                        className={cn(
+                          "h-3 w-3",
+                          isResettingKeyCooldowns && "animate-pulse",
+                        )}
+                      />
+                    </button>
+                  )}
                 </span>
               )}
             </div>
