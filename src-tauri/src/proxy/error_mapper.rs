@@ -80,7 +80,9 @@ pub fn get_error_message(error: &ProxyError) -> String {
         ProxyError::ForwardFailed(msg) => format!("转发失败: {msg}"),
         ProxyError::NoAvailableProvider => "无可用 Provider".to_string(),
         ProxyError::AllProvidersCircuitOpen => "所有供应商已熔断，无可用渠道".to_string(),
-        ProxyError::NoProviderKeysAvailable { .. } => "Provider Key Pool 中没有可用 Key".to_string(),
+        ProxyError::NoProviderKeysAvailable { .. } => {
+            "Provider Key Pool 中没有可用 Key".to_string()
+        }
         ProxyError::NoProvidersConfigured => "未配置供应商".to_string(),
         ProxyError::MaxRetriesExceeded => "所有 Provider 都失败，重试耗尽".to_string(),
         ProxyError::ProviderUnhealthy(msg) => format!("Provider 不健康: {msg}"),

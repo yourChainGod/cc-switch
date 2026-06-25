@@ -896,12 +896,7 @@ function ProviderFormFull({
       return isOpencodeLiveProviderIdsLoading;
     }
     return false;
-  }, [
-    appId,
-    isAnyOmoCategory,
-    isEditMode,
-    isOpencodeLiveProviderIdsLoading,
-  ]);
+  }, [appId, isAnyOmoCategory, isEditMode, isOpencodeLiveProviderIdsLoading]);
 
   const isProviderKeyLocked = useMemo(() => {
     if (!isEditMode || !providerId) return false;
@@ -1298,12 +1293,41 @@ function ProviderFormFull({
 
     payload.meta = nextMeta;
 
-    // Claude 新增模式：API Key 输入框支持粘贴多个 Key，
-    // 完整列表随表单上交，创建供应商后自动组成 Key 池
-    if (appId === "claude" && !initialData) {
-      const keys = splitApiKeys(apiKey);
+    // 新增模式：API Key 输入框支持粘贴多个 Key，
+    // 主配置只写首个 Key，完整列表随表单上交并在创建后组成 Key 池。
+    if ((appId === "claude" || appId === "codex") && !initialData) {
+      const keys = splitApiKeys(appId === "codex" ? codexApiKey : apiKey);
       if (keys.length > 1) {
         payload.providerKeys = keys;
+        try {
+          if (appId === "codex") {
+            const config = JSON.parse(payload.settingsConfig) as {
+              auth?: Record<string, unknown>;
+              [key: string]: unknown;
+            };
+            payload.settingsConfig = JSON.stringify({
+              ...config,
+              auth: {
+                ...(config.auth ?? {}),
+                OPENAI_API_KEY: keys[0],
+              },
+            });
+          } else {
+            const config = JSON.parse(payload.settingsConfig) as {
+              env?: Record<string, unknown>;
+              [key: string]: unknown;
+            };
+            payload.settingsConfig = JSON.stringify({
+              ...config,
+              env: {
+                ...(config.env ?? {}),
+                [localApiKeyField]: keys[0],
+              },
+            });
+          }
+        } catch {
+          // Keep the existing validation path for unusual custom JSON shapes.
+        }
       }
     }
 
@@ -1867,17 +1891,16 @@ function ProviderFormFull({
             </>
           )}
 
-          {!isAnyOmoCategory &&
-            appId !== "opencode" && (
-              <ProviderAdvancedConfig
-                testConfig={testConfig}
-                pricingConfig={pricingConfig}
-                headerRules={headerRules}
-                onTestConfigChange={setTestConfig}
-                onPricingConfigChange={setPricingConfig}
-                onHeaderRulesChange={setHeaderRules}
-              />
-            )}
+          {!isAnyOmoCategory && appId !== "opencode" && (
+            <ProviderAdvancedConfig
+              testConfig={testConfig}
+              pricingConfig={pricingConfig}
+              headerRules={headerRules}
+              onTestConfigChange={setTestConfig}
+              onPricingConfigChange={setPricingConfig}
+              onHeaderRulesChange={setHeaderRules}
+            />
+          )}
 
           {showButtons && (
             <div className="flex justify-end gap-2">

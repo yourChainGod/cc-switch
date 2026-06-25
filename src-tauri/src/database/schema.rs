@@ -199,12 +199,15 @@ impl Database {
             duration_ms INTEGER, status_code INTEGER NOT NULL, error_message TEXT, session_id TEXT,
             provider_type TEXT, is_streaming INTEGER NOT NULL DEFAULT 0,
             cost_multiplier TEXT NOT NULL DEFAULT '1.0', created_at INTEGER NOT NULL,
-            data_source TEXT NOT NULL DEFAULT 'proxy'
+            data_source TEXT NOT NULL DEFAULT 'proxy',
+            decision_trace TEXT, upstream_error_body TEXT
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
         // CREATE TABLE IF NOT EXISTS 不会补齐旧表缺失字段；索引创建前必须先确保列存在。
         Self::add_column_if_missing(conn, "proxy_request_logs", "provider_key_id", "TEXT")?;
         Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_model", "TEXT")?;
+        Self::add_column_if_missing(conn, "proxy_request_logs", "decision_trace", "TEXT")?;
+        Self::add_column_if_missing(conn, "proxy_request_logs", "upstream_error_body", "TEXT")?;
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON proxy_request_logs(provider_id, app_type)", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -478,6 +481,11 @@ impl Database {
                         log::info!("迁移数据库从 v16 到 v17（请求日志记录实际计价模型）");
                         Self::migrate_v16_to_v17(conn)?;
                         Self::set_user_version(conn, 17)?;
+                    }
+                    17 => {
+                        log::info!("迁移数据库从 v17 到 v18（请求日志记录决策链与上游错误响应体）");
+                        Self::migrate_v17_to_v18(conn)?;
+                        Self::set_user_version(conn, 18)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1305,6 +1313,17 @@ impl Database {
             Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_model", "TEXT")?;
         }
         log::info!("v16 -> v17 迁移完成：proxy_request_logs 已添加 pricing_model");
+        Ok(())
+    }
+
+    fn migrate_v17_to_v18(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(conn, "proxy_request_logs", "decision_trace", "TEXT")?;
+            Self::add_column_if_missing(conn, "proxy_request_logs", "upstream_error_body", "TEXT")?;
+        }
+        log::info!(
+            "v17 -> v18 迁移完成：proxy_request_logs 已添加 decision_trace / upstream_error_body"
+        );
         Ok(())
     }
 

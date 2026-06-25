@@ -174,6 +174,8 @@
     "summary": "Key {{available}}/{{total}}",
     "summaryWithIssues": "Key {{total}} / {{issues}} 異常",
     "summaryTooltip": "{{available}}/{{total}} 個 Key 可用。不穩定：{{degraded}}，冷卻中：{{cooldown}}，已停用：{{disabled}}。最高優先級：{{priority}}。",
+    "resetCooldown": "重置冷卻",
+    "resetCooldownTooltip": "重置該供應商全部 Key 的冷卻與失敗計數，使其恢復可用",
     "configMode": {
       "auto": "自動跟隨",
       "manual": "手動指定"
@@ -1305,6 +1307,15 @@
     "performance": "效能資訊",
     "latency": "延遲",
     "errorMessage": "錯誤訊息",
+    "decisionChain": "決策鏈",
+    "upstreamErrorBody": "上游原始錯誤",
+    "failoverSwitch": "故障轉移切換",
+    "decisionOutcome": {
+      "success": "成功",
+      "failed": "失敗",
+      "skipped_circuit_breaker": "熔斷跳過",
+      "pending": "進行中"
+    },
     "requests": "請求數",
     "tokens": "Tokens",
     "avgCost": "平均成本",

@@ -33,6 +33,20 @@ export interface RequestLog {
   errorMessage?: string;
   createdAt: number;
   dataSource?: string;
+  decisionTrace?: string; // JSON string, parse to DecisionStep[]
+  upstreamErrorBody?: string;
+}
+
+export interface DecisionStep {
+  index: number;
+  providerId: string;
+  providerName: string;
+  keyId?: string;
+  outcome: "success" | "failed" | "skipped_circuit_breaker" | "pending";
+  statusCode?: number;
+  error?: string;
+  retryKind?: string;
+  isFailoverSwitch: boolean;
 }
 
 export interface SessionSyncResult {

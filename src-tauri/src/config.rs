@@ -222,7 +222,8 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         context: format!("创建临时文件失败: {}", parent.display()),
         source: e,
     })?;
-    tmp.write_all(data).map_err(|e| AppError::io(tmp.path(), e))?;
+    tmp.write_all(data)
+        .map_err(|e| AppError::io(tmp.path(), e))?;
     // 落盘后再 rename，否则掉电时可能出现目标文件已替换但内容丢失
     tmp.as_file()
         .sync_all()

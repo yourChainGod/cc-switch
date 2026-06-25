@@ -91,8 +91,7 @@ static RE_SECRET_KV: Lazy<Regex> = Lazy::new(|| {
 /// 短目录段（各自 <20 或纯字母/纯数字），不再误伤；真正的随机密钥（URL-safe
 /// base64 / token 用的就是 `A-Za-z0-9_-`）仍能命中。代价：含 `/` 的标准 base64
 /// 裸串（如 AWS secret）兜底会漏，但这类通常带 `xxx=` 键名前缀，由 RE_SECRET_KV 接住。
-static RE_TOKEN_CANDIDATE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[A-Za-z0-9_-]{20,}").unwrap());
+static RE_TOKEN_CANDIDATE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[A-Za-z0-9_-]{20,}").unwrap());
 
 // --- 校验辅助 ---
 
@@ -276,10 +275,7 @@ pub fn redact_text(text: &str, cfg: &PrivacyFilterConfig) -> RedactOutcome {
         s = out.into_owned();
     }
 
-    RedactOutcome {
-        redacted: s,
-        count,
-    }
+    RedactOutcome { redacted: s, count }
 }
 
 #[cfg(test)]
@@ -300,7 +296,10 @@ mod tests {
 
     #[test]
     fn redacts_email_and_phone() {
-        let out = redact_text("我的邮箱是 contact@example.com，手机号是 13800138000", &cfg_all());
+        let out = redact_text(
+            "我的邮箱是 contact@example.com，手机号是 13800138000",
+            &cfg_all(),
+        );
         assert_eq!(out.redacted, "我的邮箱是 [邮箱]，手机号是 [电话]");
         assert_eq!(out.count, 2);
     }
@@ -339,10 +338,7 @@ mod tests {
 
     #[test]
     fn redacts_known_secret_prefix() {
-        let out = redact_text(
-            "key=sk-abcdefghijklmnopqrstuvwxyz0123456789",
-            &cfg_all(),
-        );
+        let out = redact_text("key=sk-abcdefghijklmnopqrstuvwxyz0123456789", &cfg_all());
         assert!(out.redacted.contains("[密钥]"), "got: {}", out.redacted);
     }
 
@@ -355,12 +351,20 @@ mod tests {
             "disk-usage-monitoring-dashboard-v2",
         ] {
             let out = redact_text(&format!("模块 {s} 已就绪"), &cfg_all());
-            assert!(!out.redacted.contains("[密钥]"), "false positive on: {s} -> {}", out.redacted);
+            assert!(
+                !out.redacted.contains("[密钥]"),
+                "false positive on: {s} -> {}",
+                out.redacted
+            );
             assert!(out.redacted.contains(s), "mangled: {}", out.redacted);
         }
         // 独立出现的真实 key 仍应命中。
         let real = redact_text("export KEY=sk-abcdefghijklmnopqrstuvwxyz here", &cfg_all());
-        assert!(real.redacted.contains("[密钥]"), "should match real key: {}", real.redacted);
+        assert!(
+            real.redacted.contains("[密钥]"),
+            "should match real key: {}",
+            real.redacted
+        );
     }
 
     #[test]
@@ -389,7 +393,7 @@ mod tests {
             "my-awesome-project-v3-final",
             "feature-user-auth-refactor-2024",
         ] {
-            let out = redact_text(&format!("分支 {s} 合并", ), &cfg_all());
+            let out = redact_text(&format!("分支 {s} 合并",), &cfg_all());
             assert_eq!(out.count, 0, "slug misclassified: {s} -> {}", out.redacted);
             assert!(out.redacted.contains(s), "slug mangled: {}", out.redacted);
         }
@@ -414,7 +418,11 @@ mod tests {
             "src/components/settings/PrivacyFilterSettings.tsx",
         ] {
             let out = redact_text(&format!("打开文件 {p} 看看"), &cfg_all());
-            assert_eq!(out.count, 0, "path misclassified as secret: {p} -> {}", out.redacted);
+            assert_eq!(
+                out.count, 0,
+                "path misclassified as secret: {p} -> {}",
+                out.redacted
+            );
             assert!(out.redacted.contains(p), "path mangled: {}", out.redacted);
         }
     }
@@ -422,7 +430,10 @@ mod tests {
     #[test]
     fn urlsafe_random_token_still_redacted() {
         // 收窄字符集后，URL-safe base64 / 混合随机串仍应命中兜底。
-        let out = redact_text("token dGhpcyBpcyBhIHNlY3JldCB0b2tlbjEyMzQ1Ng here", &cfg_all());
+        let out = redact_text(
+            "token dGhpcyBpcyBhIHNlY3JldCB0b2tlbjEyMzQ1Ng here",
+            &cfg_all(),
+        );
         assert!(out.redacted.contains("[密钥]"), "got: {}", out.redacted);
     }
 }

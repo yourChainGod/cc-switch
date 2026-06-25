@@ -177,6 +177,8 @@
     "summary": "Ключи {{available}}/{{total}}",
     "summaryWithIssues": "Ключи {{total}} / {{issues}} с проблемами",
     "summaryTooltip": "Доступно ключей: {{available}}/{{total}}. Нестабильные: {{degraded}}, охлаждение: {{cooldown}}, отключённые: {{disabled}}. Высший приоритет: {{priority}}.",
+    "resetCooldown": "Сбросить охлаждение",
+    "resetCooldownTooltip": "Сбросить охлаждение и счётчики ошибок для всех ключей этого провайдера, вернув их в доступное состояние",
     "empty": "Ключи провайдера не настроены",
     "configKey": "Ключ конфигурации",
     "configMode": {
@@ -1394,6 +1396,15 @@
     "performance": "Производительность",
     "latency": "Задержка",
     "errorMessage": "Сообщение об ошибке",
+    "decisionChain": "Цепочка решений",
+    "upstreamErrorBody": "Исходная ошибка вышестоящего сервера",
+    "failoverSwitch": "Переключение при отказе",
+    "decisionOutcome": {
+      "success": "Успех",
+      "failed": "Ошибка",
+      "skipped_circuit_breaker": "Пропущено (предохранитель)",
+      "pending": "В процессе"
+    },
     "requests": "Запросы",
     "tokens": "Токены",
     "avgCost": "Средняя стоимость",

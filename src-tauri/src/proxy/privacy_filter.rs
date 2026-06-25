@@ -165,7 +165,10 @@ mod tests {
         assert_eq!(n, 4);
         assert_eq!(body["system"], json!("联系 [邮箱]"));
         assert_eq!(body["messages"][0]["content"], json!("我的手机号 [电话]"));
-        assert_eq!(body["messages"][1]["content"][0]["text"], json!("邮箱 [邮箱]"));
+        assert_eq!(
+            body["messages"][1]["content"][0]["text"],
+            json!("邮箱 [邮箱]")
+        );
         assert_eq!(
             body["messages"][1]["content"][1]["content"][0]["text"],
             json!("另一个 [邮箱]")
@@ -186,10 +189,7 @@ mod tests {
         let n = apply(&mut body, &cfg());
         assert_eq!(n, 3);
         assert_eq!(body["instructions"], json!("用户邮箱 [邮箱]"));
-        assert_eq!(
-            body["input"][0]["content"][0]["text"],
-            json!("手机 [电话]")
-        );
+        assert_eq!(body["input"][0]["content"][0]["text"], json!("手机 [电话]"));
         assert_eq!(body["input"][1]["output"], json!("结果里有 [邮箱]"));
     }
 
@@ -203,8 +203,14 @@ mod tests {
         });
         let n = apply(&mut body, &cfg());
         assert_eq!(n, 2);
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], json!("system 邮箱 [邮箱]"));
-        assert_eq!(body["contents"][0]["parts"][0]["text"], json!("我的邮箱 [邮箱]"));
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            json!("system 邮箱 [邮箱]")
+        );
+        assert_eq!(
+            body["contents"][0]["parts"][0]["text"],
+            json!("我的邮箱 [邮箱]")
+        );
         assert_eq!(body["contents"][0]["parts"][1]["text"], json!("无敏感"));
     }
 

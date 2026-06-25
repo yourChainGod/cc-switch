@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 import {
   Select,
   SelectContent,
@@ -25,8 +26,9 @@ import {
   type LogFilters,
   type UsageRangeSelection,
 } from "@/types/usage";
-import { ChevronLeft, ChevronRight, Search, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileSearch, Search, X } from "lucide-react";
 import { UsageDateRangePicker } from "./UsageDateRangePicker";
+import { RequestDetailPanel } from "./RequestDetailPanel";
 import {
   fmtInt,
   fmtUsd,
@@ -55,6 +57,9 @@ export function RequestLogTable({
   const [draftFilters, setDraftFilters] = useState<LogFilters>({});
   const [page, setPage] = useState(0);
   const [pageInput, setPageInput] = useState("");
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(
+    null,
+  );
   const pageSize = 20;
 
   const dashboardAppTypeActive = dashboardAppType && dashboardAppType !== "all";
@@ -118,6 +123,10 @@ export function RequestLogTable({
     if (parsed < 1 || parsed > totalPages) return;
     setPage(parsed - 1);
     setPageInput("");
+  };
+
+  const openRequestDetail = (requestId: string) => {
+    setSelectedRequestId(requestId);
   };
 
   const language = i18n.resolvedLanguage || i18n.language || "en";
@@ -281,13 +290,16 @@ export function RequestLogTable({
                   <TableHead className="text-center whitespace-nowrap">
                     {t("usage.source", { defaultValue: "Source" })}
                   </TableHead>
+                  <TableHead className="w-16 text-center whitespace-nowrap">
+                    {t("usage.detail", { defaultValue: "详情" })}
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {logs.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={9}
+                      colSpan={10}
                       className="text-center text-muted-foreground"
                     >
                       {t("usage.noData")}
@@ -297,7 +309,22 @@ export function RequestLogTable({
                   logs.map((log) => {
                     const unpriced = isUnpricedUsage(log);
                     return (
-                      <TableRow key={log.requestId}>
+                      <TableRow
+                        key={log.requestId}
+                        role="button"
+                        tabIndex={0}
+                        title={t("usage.openRequestDetail", {
+                          defaultValue: "查看请求详情",
+                        })}
+                        onClick={() => openRequestDetail(log.requestId)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            openRequestDetail(log.requestId);
+                          }
+                        }}
+                        className="cursor-pointer transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none"
+                      >
                         <TableCell className="text-center whitespace-nowrap text-xs px-1.5">
                           {new Date(log.createdAt * 1000).toLocaleString(
                             locale,
@@ -400,17 +427,35 @@ export function RequestLogTable({
                         </TableCell>
                         <TableCell className="text-center">
                           <span
-                            className={
+                            className={cn(
+                              "inline-flex h-6 min-w-12 items-center justify-center rounded-md border px-2 font-mono text-xs font-medium",
                               log.statusCode >= 200 && log.statusCode < 300
-                                ? "text-green-600"
-                                : "text-red-600"
-                            }
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300"
+                                : "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300",
+                            )}
                           >
                             {log.statusCode}
                           </span>
                         </TableCell>
                         <TableCell className="text-center text-xs text-muted-foreground">
                           {log.dataSource || "proxy"}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                            title={t("usage.openRequestDetail", {
+                              defaultValue: "查看请求详情",
+                            })}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openRequestDetail(log.requestId);
+                            }}
+                          >
+                            <FileSearch className="h-3.5 w-3.5" />
+                          </Button>
                         </TableCell>
                       </TableRow>
                     );
@@ -498,6 +543,12 @@ export function RequestLogTable({
             </div>
           </div>
         </>
+      )}
+      {selectedRequestId && (
+        <RequestDetailPanel
+          requestId={selectedRequestId}
+          onClose={() => setSelectedRequestId(null)}
+        />
       )}
     </div>
   );

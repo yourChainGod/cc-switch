@@ -177,6 +177,8 @@
     "summary": "Key {{available}}/{{total}}",
     "summaryWithIssues": "Key {{total}} / {{issues}} 异常",
     "summaryTooltip": "{{available}}/{{total}} 个 Key 可用。不稳定：{{degraded}}，冷却中：{{cooldown}}，已停用：{{disabled}}。最高优先级：{{priority}}。",
+    "resetCooldown": "重置冷却",
+    "resetCooldownTooltip": "重置该供应商全部 Key 的冷却与失败计数，使其恢复可用",
     "empty": "还没有配置独立 Key",
     "configKey": "配置 Key",
     "configMode": {
@@ -1394,6 +1396,15 @@
     "performance": "性能信息",
     "latency": "延迟",
     "errorMessage": "错误信息",
+    "decisionChain": "决策链",
+    "upstreamErrorBody": "上游原始错误",
+    "failoverSwitch": "故障转移切换",
+    "decisionOutcome": {
+      "success": "成功",
+      "failed": "失败",
+      "skipped_circuit_breaker": "熔断跳过",
+      "pending": "进行中"
+    },
     "requests": "请求数",
     "tokens": "Tokens",
     "avgCost": "平均成本",

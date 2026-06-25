@@ -24,6 +24,7 @@ use super::{
 use crate::{app_config::AppType, provider::Provider};
 use futures::StreamExt;
 use http::Extensions;
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -36,6 +37,9 @@ pub struct ForwardResult {
     pub claude_api_format: Option<String>,
     /// 实际发往上游的模型名（模型映射/路由接管后的值）。
     pub outbound_model: Option<String>,
+    /// 决策链：本次请求中每一次 provider/key 尝试的记录。
+    /// 仅当发生过多次尝试（故障转移/重试/熔断跳过）时才有意义；单次成功通常为单元素或空。
+    pub decision_trace: Vec<DecisionStep>,
     /// 活跃连接 RAII guard：随响应一起流转到 response_processor / handle_claude_transform，
     /// 最终被 move 进流式 body future（或非流式响应作用域），覆盖整个响应生命周期。
     pub(crate) connection_guard: Option<ActiveConnectionGuard>,
@@ -45,6 +49,34 @@ pub struct ForwardError {
     pub error: ProxyError,
     pub provider: Option<Provider>,
     pub key_id: Option<String>,
+    /// 决策链：失败前每一次尝试的记录。
+    pub decision_trace: Vec<DecisionStep>,
+}
+
+/// 决策链中的单步记录：一次 provider/key 尝试（或熔断跳过）的结果。
+///
+/// 序列化为 JSON 存入 `proxy_request_logs.decision_trace`，供统计页详情展开。
+/// 字段命名用 camelCase 以直接对接前端。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionStep {
+    /// 第几次尝试（从 1 开始）。
+    pub index: usize,
+    pub provider_id: String,
+    pub provider_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// 结果：success / failed / skipped_circuit_breaker。
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 同通道重试类型：anyrouter / media / anyrouter_codex / rectifier 等（仅重试步骤）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_kind: Option<String>,
+    /// 该步是否相对请求起始供应商发生了故障转移切换。
+    pub is_failover_switch: bool,
 }
 
 /// 活跃连接 RAII guard
@@ -246,6 +278,7 @@ impl RequestForwarder {
         key_id: Option<&str>,
         app_type_str: &str,
         used_half_open_permit: bool,
+        decision_trace: Vec<DecisionStep>,
     ) -> ForwardResult {
         self.record_success_result(&provider.id, key_id, app_type_str, used_half_open_permit)
             .await;
@@ -287,6 +320,7 @@ impl RequestForwarder {
             key_id: attempt_key_id,
             claude_api_format,
             outbound_model,
+            decision_trace,
             connection_guard: None,
         }
     }
@@ -391,7 +425,14 @@ impl RequestForwarder {
         rectifier_label: &str,
         last_error: &mut Option<ProxyError>,
         last_provider: &mut Option<Provider>,
+        decision_trace: &mut Vec<DecisionStep>,
     ) -> Option<ForwardError> {
+        // 标记当前 attempt 的决策步骤为失败（携带重试后的最终错误）。
+        if let Some(step) = decision_trace.last_mut() {
+            step.outcome = "failed".to_string();
+            step.status_code = upstream_status_code(&retry_err);
+            step.error = Some(retry_err.to_string());
+        }
         // Provider 错误：本家上游/网络确实出问题，下一家 provider 可能可用 → 继续故障转移。
         // 客户端错误：整流后请求仍违法，下一家也修不好 → 直接返回。
         let is_provider_error = match &retry_err {
@@ -457,6 +498,7 @@ impl RequestForwarder {
             error: retry_err,
             provider: Some(provider.clone()),
             key_id: key_id.map(str::to_string),
+            decision_trace: std::mem::take(decision_trace),
         })
     }
 
@@ -581,6 +623,7 @@ impl RequestForwarder {
                 error: ProxyError::NoAvailableProvider,
                 provider: None,
                 key_id: None,
+                decision_trace: Vec::new(),
             });
         }
 
@@ -590,6 +633,8 @@ impl RequestForwarder {
         let mut attempted_channels = 0usize;
         let mut attempted_channel_ids = HashSet::new();
         let mut provider_blocked_by_failure = HashSet::new();
+        // 决策链累加器：每次 provider/key 尝试（含熔断跳过）记一条，随结果流出落库。
+        let mut decision_trace: Vec<DecisionStep> = Vec::new();
         // anyrouter 429 同通道重试预算：独立于 max_retries 设置，整个请求内共享
         //（多 key 轮转时各 key 的原地重试共用同一份预算，防止预算被放大 N 倍）。
         let mut anyrouter_429_retry_budget = self.anyrouter_429_max_retries;
@@ -647,6 +692,18 @@ impl RequestForwarder {
             };
 
             if !allowed {
+                decision_trace.push(DecisionStep {
+                    index: decision_trace.len() + 1,
+                    provider_id: provider.id.clone(),
+                    provider_name: provider.name.clone(),
+                    key_id: key_id.map(str::to_string),
+                    outcome: "skipped_circuit_breaker".to_string(),
+                    status_code: None,
+                    error: None,
+                    retry_kind: None,
+                    is_failover_switch: self.current_provider_id_at_start.as_str()
+                        != provider.id.as_str(),
+                });
                 continue;
             }
 
@@ -681,6 +738,20 @@ impl RequestForwarder {
                 status.current_provider_id = Some(provider.id.clone());
             }
 
+            // 决策链：为本次 attempt 记一条 pending 步骤，结局由后续 Ok/Err 回填。
+            decision_trace.push(DecisionStep {
+                index: decision_trace.len() + 1,
+                provider_id: provider.id.clone(),
+                provider_name: provider.name.clone(),
+                key_id: key_id.map(str::to_string),
+                outcome: "pending".to_string(),
+                status_code: None,
+                error: None,
+                retry_kind: None,
+                is_failover_switch: self.current_provider_id_at_start.as_str()
+                    != provider.id.as_str(),
+            });
+
             // 转发请求（每个 Provider 只尝试一次，重试由客户端控制）
             match self
                 .forward(
@@ -696,6 +767,11 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, claude_api_format, outbound_model)) => {
+                    // 决策链：本次 attempt 成功，回填结局。
+                    if let Some(step) = decision_trace.last_mut() {
+                        step.outcome = "success".to_string();
+                        step.status_code = Some(200);
+                    }
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(
@@ -750,10 +826,18 @@ impl RequestForwarder {
                         key_id: attempt.key_id.clone(),
                         claude_api_format,
                         outbound_model,
+                        decision_trace,
                         connection_guard: None,
                     });
                 }
                 Err(mut e) => {
+                    // 决策链：先把本次 attempt 标记为失败（带上游状态码/错误体）。
+                    // 若后续同通道重试成功，对应分支会把该步回填为 success。
+                    if let Some(step) = decision_trace.last_mut() {
+                        step.outcome = "failed".to_string();
+                        step.status_code = upstream_status_code(&e);
+                        step.error = extract_error_message(&e);
+                    }
                     // anyrouter 429/500/503 特判：同通道高强度重试，预算独立于
                     // AppProxyConfig.max_retries（该设置只管"换几家"，不管这里）。
                     // 重试间隔尊重上游 Retry-After（封顶），否则短退避线性爬升。
@@ -765,8 +849,7 @@ impl RequestForwarder {
                     );
                     if is_anyrouter && is_transient_upstream_error(&e) {
                         let mut retry_round: u64 = 0;
-                        while anyrouter_429_retry_budget > 0 && is_transient_upstream_error(&e)
-                        {
+                        while anyrouter_429_retry_budget > 0 && is_transient_upstream_error(&e) {
                             let wait_ms = match &e {
                                 ProxyError::UpstreamError {
                                     retry_after: Some(ra),
@@ -811,6 +894,12 @@ impl RequestForwarder {
                                         "[{app_type_str}] [anyrouter] 429/500/503 重试成功（共重试 {retry_round} 次）: provider={}",
                                         provider.name
                                     );
+                                    if let Some(step) = decision_trace.last_mut() {
+                                        step.outcome = "success".to_string();
+                                        step.status_code = Some(200);
+                                        step.retry_kind = Some("anyrouter".to_string());
+                                        step.error = None;
+                                    }
                                     return Ok(self
                                         .finalize_same_provider_retry_success(
                                             response,
@@ -821,11 +910,18 @@ impl RequestForwarder {
                                             key_id,
                                             app_type_str,
                                             used_half_open_permit,
+                                            std::mem::take(&mut decision_trace),
                                         )
                                         .await);
                                 }
                                 Err(retry_err) => {
                                     e = retry_err;
+                                    if let Some(step) = decision_trace.last_mut() {
+                                        step.outcome = "failed".to_string();
+                                        step.status_code = upstream_status_code(&e);
+                                        step.error = extract_error_message(&e);
+                                        step.retry_kind = Some("anyrouter".to_string());
+                                    }
                                 }
                             }
                         }
@@ -883,6 +979,12 @@ impl RequestForwarder {
                                     log::info!(
                                         "[{app_type_str}] [Media] Unsupported-image retry succeeded"
                                     );
+                                    if let Some(step) = decision_trace.last_mut() {
+                                        step.outcome = "success".to_string();
+                                        step.status_code = Some(200);
+                                        step.retry_kind = Some("media".to_string());
+                                        step.error = None;
+                                    }
                                     return Ok(self
                                         .finalize_same_provider_retry_success(
                                             response,
@@ -893,6 +995,7 @@ impl RequestForwarder {
                                             key_id,
                                             app_type_str,
                                             used_half_open_permit,
+                                            std::mem::take(&mut decision_trace),
                                         )
                                         .await);
                                 }
@@ -900,6 +1003,9 @@ impl RequestForwarder {
                                     log::warn!(
                                         "[{app_type_str}] [Media] Unsupported-image retry still failed: {retry_err}"
                                     );
+                                    if let Some(step) = decision_trace.last_mut() {
+                                        step.retry_kind = Some("media".to_string());
+                                    }
                                     if let Some(err) = self
                                         .handle_rectifier_retry_failure(
                                             retry_err,
@@ -910,6 +1016,7 @@ impl RequestForwarder {
                                             "media 降级",
                                             &mut last_error,
                                             &mut last_provider,
+                                            &mut decision_trace,
                                         )
                                         .await
                                     {
@@ -958,6 +1065,12 @@ impl RequestForwarder {
                             {
                                 Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!("[{app_type_str}] [anyrouter] Codex 兼容重试成功");
+                                    if let Some(step) = decision_trace.last_mut() {
+                                        step.outcome = "success".to_string();
+                                        step.status_code = Some(200);
+                                        step.retry_kind = Some("anyrouter_codex".to_string());
+                                        step.error = None;
+                                    }
                                     return Ok(self
                                         .finalize_same_provider_retry_success(
                                             response,
@@ -968,6 +1081,7 @@ impl RequestForwarder {
                                             key_id,
                                             app_type_str,
                                             used_half_open_permit,
+                                            std::mem::take(&mut decision_trace),
                                         )
                                         .await);
                                 }
@@ -975,6 +1089,9 @@ impl RequestForwarder {
                                     log::warn!(
                                         "[{app_type_str}] [anyrouter] Codex 兼容重试仍失败: {retry_err}"
                                     );
+                                    if let Some(step) = decision_trace.last_mut() {
+                                        step.retry_kind = Some("anyrouter_codex".to_string());
+                                    }
                                     if let Some(err) = self
                                         .handle_rectifier_retry_failure(
                                             retry_err,
@@ -985,6 +1102,7 @@ impl RequestForwarder {
                                             "anyrouter Codex 兼容",
                                             &mut last_error,
                                             &mut last_provider,
+                                            &mut decision_trace,
                                         )
                                         .await
                                     {
@@ -1029,6 +1147,7 @@ impl RequestForwarder {
                                     error: e,
                                     provider: Some(provider.clone()),
                                     key_id: attempt.key_id.clone(),
+                                    decision_trace: std::mem::take(&mut decision_trace),
                                 });
                             }
 
@@ -1069,6 +1188,12 @@ impl RequestForwarder {
                                 {
                                     Ok((response, claude_api_format, outbound_model)) => {
                                         log::info!("[{app_type_str}] [RECT-002] 整流重试成功");
+                                        if let Some(step) = decision_trace.last_mut() {
+                                            step.outcome = "success".to_string();
+                                            step.status_code = Some(200);
+                                            step.retry_kind = Some("rectifier".to_string());
+                                            step.error = None;
+                                        }
                                         self.record_success_result(
                                             &provider.id,
                                             key_id,
@@ -1125,6 +1250,7 @@ impl RequestForwarder {
                                             key_id: attempt.key_id.clone(),
                                             claude_api_format,
                                             outbound_model,
+                                            decision_trace: std::mem::take(&mut decision_trace),
                                             connection_guard: None,
                                         });
                                     }
@@ -1132,6 +1258,9 @@ impl RequestForwarder {
                                         log::warn!(
                                             "[{app_type_str}] [RECT-003] 整流重试仍失败: {retry_err}"
                                         );
+                                        if let Some(step) = decision_trace.last_mut() {
+                                            step.retry_kind = Some("rectifier".to_string());
+                                        }
                                         if let Some(err) = self
                                             .handle_rectifier_retry_failure(
                                                 retry_err,
@@ -1142,14 +1271,14 @@ impl RequestForwarder {
                                                 "整流",
                                                 &mut last_error,
                                                 &mut last_provider,
+                                                &mut decision_trace,
                                             )
                                             .await
                                         {
                                             return Err(err);
                                         }
                                         if key_id.is_none() {
-                                            provider_blocked_by_failure
-                                                .insert(provider.id.clone());
+                                            provider_blocked_by_failure.insert(provider.id.clone());
                                         }
                                         continue;
                                     }
@@ -1190,6 +1319,7 @@ impl RequestForwarder {
                                     error: e,
                                     provider: Some(provider.clone()),
                                     key_id: attempt.key_id.clone(),
+                                    decision_trace: std::mem::take(&mut decision_trace),
                                 });
                             }
 
@@ -1218,6 +1348,7 @@ impl RequestForwarder {
                                     error: e,
                                     provider: Some(provider.clone()),
                                     key_id: attempt.key_id.clone(),
+                                    decision_trace: std::mem::take(&mut decision_trace),
                                 });
                             }
 
@@ -1246,6 +1377,12 @@ impl RequestForwarder {
                             {
                                 Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!("[{app_type_str}] [RECT-011] budget 整流重试成功");
+                                    if let Some(step) = decision_trace.last_mut() {
+                                        step.outcome = "success".to_string();
+                                        step.status_code = Some(200);
+                                        step.retry_kind = Some("rectifier_budget".to_string());
+                                        step.error = None;
+                                    }
                                     self.record_success_result(
                                         &provider.id,
                                         key_id,
@@ -1296,6 +1433,7 @@ impl RequestForwarder {
                                         key_id: attempt.key_id.clone(),
                                         claude_api_format,
                                         outbound_model,
+                                        decision_trace: std::mem::take(&mut decision_trace),
                                         connection_guard: None,
                                     });
                                 }
@@ -1303,6 +1441,9 @@ impl RequestForwarder {
                                     log::warn!(
                                         "[{app_type_str}] [RECT-012] budget 整流重试仍失败: {retry_err}"
                                     );
+                                    if let Some(step) = decision_trace.last_mut() {
+                                        step.retry_kind = Some("rectifier_budget".to_string());
+                                    }
                                     if let Some(err) = self
                                         .handle_rectifier_retry_failure(
                                             retry_err,
@@ -1313,6 +1454,7 @@ impl RequestForwarder {
                                             "budget 整流",
                                             &mut last_error,
                                             &mut last_provider,
+                                            &mut decision_trace,
                                         )
                                         .await
                                     {
@@ -1348,6 +1490,7 @@ impl RequestForwarder {
                             error: e,
                             provider: Some(provider.clone()),
                             key_id: attempt.key_id.clone(),
+                            decision_trace: std::mem::take(&mut decision_trace),
                         });
                     }
 
@@ -1493,6 +1636,7 @@ impl RequestForwarder {
                                 error: e,
                                 provider: Some(provider.clone()),
                                 key_id: attempt.key_id.clone(),
+                                decision_trace: std::mem::take(&mut decision_trace),
                             });
                         }
                     }
@@ -1515,6 +1659,7 @@ impl RequestForwarder {
                 error: ProxyError::NoAvailableProvider,
                 provider: None,
                 key_id: None,
+                decision_trace: std::mem::take(&mut decision_trace),
             });
         }
 
@@ -1539,6 +1684,7 @@ impl RequestForwarder {
             error: last_error.unwrap_or(ProxyError::MaxRetriesExceeded),
             provider: last_provider,
             key_id: last_key_id,
+            decision_trace,
         })
     }
 
@@ -2235,6 +2381,42 @@ fn extract_error_message(error: &ProxyError) -> Option<String> {
     }
 }
 
+/// 从 ProxyError 提取上游 HTTP 状态码（仅 UpstreamError 携带）。
+fn upstream_status_code(error: &ProxyError) -> Option<u16> {
+    match error {
+        ProxyError::UpstreamError { status, .. } => Some(*status),
+        _ => None,
+    }
+}
+
+/// 从 ProxyError 提取上游返回的错误响应体原文（仅 UpstreamError 携带）。
+fn upstream_error_body(error: &ProxyError) -> Option<String> {
+    match error {
+        ProxyError::UpstreamError { body, .. } => body.clone(),
+        _ => None,
+    }
+}
+
+/// 把决策链序列化为 JSON 字符串，仅在「发生过多次尝试或有过失败」时返回 Some。
+///
+/// 单 provider 一次成功的普通请求无决策可言（trace 为单元素 success），返回 None 不落库，
+/// 避免给每条普通请求都写一份冗余 trace。
+pub fn serialize_decision_trace(trace: &[DecisionStep]) -> Option<String> {
+    let worth_recording = trace.len() > 1
+        || trace
+            .iter()
+            .any(|s| s.outcome != "success" || s.retry_kind.is_some());
+    if !worth_recording {
+        return None;
+    }
+    serde_json::to_string(trace).ok()
+}
+
+/// 从 ForwardError 提取上游错误响应体（供失败落库存「真实上游返回」）。
+pub fn forward_error_upstream_body(err: &ForwardError) -> Option<String> {
+    upstream_error_body(&err.error)
+}
+
 /// 检测 Provider 是否为 Bedrock（通过 CLAUDE_CODE_USE_BEDROCK 环境变量判断）
 fn is_bedrock_provider(provider: &Provider) -> bool {
     provider
@@ -2702,7 +2884,13 @@ const ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS: u64 = 120_000;
 /// anyrouter 后端分钟级轮转，这些大概率稍候即恢复，故都按瞬时可重试处理
 /// （同通道重试 + 不计入 key/通道冷却与熔断健康度）。
 fn is_transient_upstream_error(error: &ProxyError) -> bool {
-    matches!(error, ProxyError::UpstreamError { status: 429 | 500 | 503, .. })
+    matches!(
+        error,
+        ProxyError::UpstreamError {
+            status: 429 | 500 | 503,
+            ..
+        }
+    )
 }
 
 fn is_anyrouter_channel(provider_name: &str, base_url: &str) -> bool {
@@ -2757,7 +2945,8 @@ fn is_invalid_responses_request_error(error: &ProxyError) -> bool {
     else {
         return false;
     };
-    body.to_ascii_lowercase().contains("invalid_responses_request")
+    body.to_ascii_lowercase()
+        .contains("invalid_responses_request")
 }
 
 /// 剥掉 Codex 请求体里所有 encrypted_content 字段（递归）与顶层 input[]
@@ -3040,18 +3229,69 @@ mod tests {
         }
     }
 
+    fn step(outcome: &str, retry_kind: Option<&str>) -> DecisionStep {
+        DecisionStep {
+            index: 1,
+            provider_id: "p1".to_string(),
+            provider_name: "Provider 1".to_string(),
+            key_id: None,
+            outcome: outcome.to_string(),
+            status_code: None,
+            error: None,
+            retry_kind: retry_kind.map(ToString::to_string),
+            is_failover_switch: false,
+        }
+    }
+
+    #[test]
+    fn serialize_decision_trace_skips_trivial_single_success() {
+        // 单 provider 一次成功、无重试：不值得落库，返回 None。
+        let trace = vec![step("success", None)];
+        assert!(serialize_decision_trace(&trace).is_none());
+    }
+
+    #[test]
+    fn serialize_decision_trace_records_multi_attempt_and_failures() {
+        // 多次尝试（故障转移）应落库。
+        let multi = vec![step("failed", None), step("success", None)];
+        assert!(serialize_decision_trace(&multi).is_some());
+
+        // 单次但发生过重试（retry_kind 有值）应落库。
+        let retried = vec![step("success", Some("anyrouter"))];
+        assert!(serialize_decision_trace(&retried).is_some());
+
+        // 单次失败也应落库（用于错误详情）。
+        let failed = vec![step("failed", None)];
+        let json = serialize_decision_trace(&failed).expect("failed step should record");
+        assert!(json.contains("\"outcome\":\"failed\""), "got: {json}");
+    }
+
     #[test]
     fn transient_upstream_error_matches_429_500_503() {
         // anyrouter 同通道重试 + 不标记冷却的触发条件：429 限流 / 500、503 高负载临时错误。
-        assert!(is_transient_upstream_error(&upstream_error(429, None, None)));
-        assert!(is_transient_upstream_error(&upstream_error(500, None, None)));
-        assert!(is_transient_upstream_error(&upstream_error(503, None, None)));
+        assert!(is_transient_upstream_error(&upstream_error(
+            429, None, None
+        )));
+        assert!(is_transient_upstream_error(&upstream_error(
+            500, None, None
+        )));
+        assert!(is_transient_upstream_error(&upstream_error(
+            503, None, None
+        )));
         // 其余 5xx 与客户端错误不在此列。
-        assert!(!is_transient_upstream_error(&upstream_error(502, None, None)));
-        assert!(!is_transient_upstream_error(&upstream_error(400, None, None)));
-        assert!(!is_transient_upstream_error(&upstream_error(200, None, None)));
+        assert!(!is_transient_upstream_error(&upstream_error(
+            502, None, None
+        )));
+        assert!(!is_transient_upstream_error(&upstream_error(
+            400, None, None
+        )));
+        assert!(!is_transient_upstream_error(&upstream_error(
+            200, None, None
+        )));
         // 非上游 HTTP 错误（如无可用供应商）不触发。
-        assert!(!is_transient_upstream_error(&ProxyError::NoAvailableProvider));
+        assert!(!is_transient_upstream_error(
+            &ProxyError::NoAvailableProvider
+        ));
     }
 
     #[test]
@@ -3093,8 +3333,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::RETRY_AFTER,
-            HeaderValue::from_str(&future.format("%a, %d %b %Y %H:%M:%S GMT").to_string())
-                .unwrap(),
+            HeaderValue::from_str(&future.format("%a, %d %b %Y %H:%M:%S GMT").to_string()).unwrap(),
         );
         let secs = parse_retry_after_header(&headers).expect("future date parses");
         assert!((85..=90).contains(&secs), "≈90s, got {secs}");
@@ -3173,11 +3412,7 @@ mod tests {
             (120, 1800, 0)
         );
         assert_eq!(
-            key_failure_cooldown(&upstream_error(
-                402,
-                Some("insufficient balance"),
-                None
-            )),
+            key_failure_cooldown(&upstream_error(402, Some("insufficient balance"), None)),
             (300, 3600, 0)
         );
         assert_eq!(
@@ -4374,7 +4609,10 @@ mod tests {
         assert!(key_2_after.cooldown_until.unwrap_or(0) > now);
 
         // provider 级健康度不被 key 通道失败污染
-        let health = db.get_provider_health("provider-1", "claude").await.unwrap();
+        let health = db
+            .get_provider_health("provider-1", "claude")
+            .await
+            .unwrap();
         assert!(health.is_healthy);
         assert_eq!(health.consecutive_failures, 0);
     }
@@ -4948,10 +5186,6 @@ mod tests {
         assert!(matches!(err, ProxyError::ForwardFailed(_)));
     }
 
-
-
-
-
     #[test]
     fn exact_header_case_preserved_for_native_claude_only() {
         let provider = test_provider();
@@ -4971,7 +5205,6 @@ mod tests {
             "Gemini", &provider, None
         ));
     }
-
 
     #[test]
     fn rewrite_claude_transform_endpoint_strips_beta_for_chat_completions() {
@@ -5194,10 +5427,6 @@ mod tests {
             &headers
         ));
     }
-
-
-
-
 
     // ===== P3: forwarder 层 media 开关回归测试 =====
     // 验证 gate 在 forwarder 这一层的"接线"，而非 media_sanitizer 纯函数本身。
@@ -5491,7 +5720,11 @@ mod tests {
 
         apply_provider_header_rules(
             &mut headers,
-            &[header_rule("remove", "anthropic-beta", "context-1m-2025-08-07")],
+            &[header_rule(
+                "remove",
+                "anthropic-beta",
+                "context-1m-2025-08-07",
+            )],
         );
 
         assert_eq!(
@@ -5502,7 +5735,11 @@ mod tests {
         // 摘空所有 token 后整头删除
         apply_provider_header_rules(
             &mut headers,
-            &[header_rule("remove", "anthropic-beta", "claude-code-20250219")],
+            &[header_rule(
+                "remove",
+                "anthropic-beta",
+                "claude-code-20250219",
+            )],
         );
         assert!(headers.get("anthropic-beta").is_none());
     }
@@ -5532,7 +5769,10 @@ mod tests {
     #[test]
     fn anyrouter_channel_is_detected_by_name_or_known_hosts() {
         // 名称命中（不分大小写）
-        assert!(is_anyrouter_channel("AnyRouter 主力", "https://example.com"));
+        assert!(is_anyrouter_channel(
+            "AnyRouter 主力",
+            "https://example.com"
+        ));
         // 两个已知域名都命中（与渠道名无关）
         assert!(is_anyrouter_channel("中转A", "https://anyrouter.top"));
         assert!(is_anyrouter_channel(
@@ -5544,7 +5784,10 @@ mod tests {
         // 其他域名 + 无关名称不命中
         assert!(!is_anyrouter_channel("packy", "https://api.packycode.com"));
         // 相似但不同的域名不命中（不能用 contains 误匹配）
-        assert!(!is_anyrouter_channel("x", "https://fakeanyrouter.top.evil.com"));
+        assert!(!is_anyrouter_channel(
+            "x",
+            "https://fakeanyrouter.top.evil.com"
+        ));
     }
 
     #[test]
@@ -5576,37 +5819,46 @@ mod tests {
         assert!(inject_adaptive_thinking_if_missing(&mut body));
         assert_eq!(body["thinking"]["type"], "adaptive");
 
-        let mut with_thinking =
-            json!({"thinking": {"type": "enabled", "budget_tokens": 2048}});
+        let mut with_thinking = json!({"thinking": {"type": "enabled", "budget_tokens": 2048}});
         assert!(!inject_adaptive_thinking_if_missing(&mut with_thinking));
         assert_eq!(with_thinking["thinking"]["type"], "enabled");
     }
 
     #[test]
     fn invalid_responses_request_error_is_matched() {
-        assert!(is_invalid_responses_request_error(&ProxyError::UpstreamError {
-            status: 400,
-            body: Some(
-                r#"{"error":{"code":"invalid_responses_request","message":"bad"}}"#.to_string()
-            ),
-            retry_after: None,
-        }));
-        assert!(is_invalid_responses_request_error(&ProxyError::UpstreamError {
-            status: 400,
-            body: Some(r#"{"error":{"message":"Invalid_Responses_Request: nope"}}"#.to_string()),
-            retry_after: None,
-        }));
+        assert!(is_invalid_responses_request_error(
+            &ProxyError::UpstreamError {
+                status: 400,
+                body: Some(
+                    r#"{"error":{"code":"invalid_responses_request","message":"bad"}}"#.to_string()
+                ),
+                retry_after: None,
+            }
+        ));
+        assert!(is_invalid_responses_request_error(
+            &ProxyError::UpstreamError {
+                status: 400,
+                body: Some(
+                    r#"{"error":{"message":"Invalid_Responses_Request: nope"}}"#.to_string()
+                ),
+                retry_after: None,
+            }
+        ));
         // 非 400 / 无关错误体不命中
-        assert!(!is_invalid_responses_request_error(&ProxyError::UpstreamError {
-            status: 500,
-            body: Some("invalid_responses_request".to_string()),
-            retry_after: None,
-        }));
-        assert!(!is_invalid_responses_request_error(&ProxyError::UpstreamError {
-            status: 400,
-            body: Some("other error".to_string()),
-            retry_after: None,
-        }));
+        assert!(!is_invalid_responses_request_error(
+            &ProxyError::UpstreamError {
+                status: 500,
+                body: Some("invalid_responses_request".to_string()),
+                retry_after: None,
+            }
+        ));
+        assert!(!is_invalid_responses_request_error(
+            &ProxyError::UpstreamError {
+                status: 400,
+                body: Some("other error".to_string()),
+                retry_after: None,
+            }
+        ));
     }
 
     #[test]
@@ -5620,8 +5872,8 @@ mod tests {
             ],
             "nested": {"deep": [{"encrypted_content": "AAA"}]}
         });
-        let stripped = codex_body_without_encrypted_and_tool_search(&body)
-            .expect("should strip something");
+        let stripped =
+            codex_body_without_encrypted_and_tool_search(&body).expect("should strip something");
         let dumped = serde_json::to_string(&stripped).unwrap();
         assert!(!dumped.contains("encrypted_content"));
         assert!(!dumped.contains("tool_search_call"));
@@ -5681,7 +5933,8 @@ mod tests {
             ..Default::default()
         });
         db.save_provider("claude", &provider).unwrap();
-        db.set_current_provider("claude", "provider-anyrouter").unwrap();
+        db.set_current_provider("claude", "provider-anyrouter")
+            .unwrap();
 
         let mut forwarder =
             test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
@@ -5804,7 +6057,8 @@ mod tests {
             None,
         );
         db.save_provider("codex", &provider).unwrap();
-        db.set_current_provider("codex", "provider-ar-codex").unwrap();
+        db.set_current_provider("codex", "provider-ar-codex")
+            .unwrap();
 
         let mut forwarder =
             test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));

@@ -174,6 +174,8 @@
     "summary": "Key {{available}}/{{total}}",
     "summaryWithIssues": "Key {{total}} / {{issues}} 件の問題",
     "summaryTooltip": "{{available}}/{{total}} 個の Key が利用可能。不安定: {{degraded}}、クールダウン中: {{cooldown}}、無効: {{disabled}}。最優先度: {{priority}}。",
+    "resetCooldown": "クールダウン解除",
+    "resetCooldownTooltip": "このプロバイダーの全 Key のクールダウンと失敗カウントをリセットし、利用可能に戻します",
     "configMode": {
       "auto": "自動追従",
       "manual": "手動指定"
@@ -1360,6 +1362,15 @@
     "performance": "パフォーマンス",
     "latency": "レイテンシー",
     "errorMessage": "エラーメッセージ",
+    "decisionChain": "判断チェーン",
+    "upstreamErrorBody": "上流の生エラー",
+    "failoverSwitch": "フェイルオーバー切り替え",
+    "decisionOutcome": {
+      "success": "成功",
+      "failed": "失敗",
+      "skipped_circuit_breaker": "サーキットブレーカーでスキップ",
+      "pending": "進行中"
+    },
     "requests": "リクエスト数",
     "tokens": "トークン",
     "avgCost": "平均コスト",

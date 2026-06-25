@@ -72,6 +72,8 @@ pub struct RequestContext {
     pub model_routing: super::model_routing::ModelRoutingConfig,
     /// 隐私过滤配置（进程内 PII / 密钥脱敏）
     pub privacy_filter_config: PrivacyFilterConfig,
+    /// 决策链 JSON（forward 完成后回填；仅多尝试请求为 Some）。
+    pub decision_trace: Option<String>,
 }
 
 impl RequestContext {
@@ -192,6 +194,7 @@ impl RequestContext {
             optimizer_config,
             model_routing,
             privacy_filter_config,
+            decision_trace: None,
         })
     }
 

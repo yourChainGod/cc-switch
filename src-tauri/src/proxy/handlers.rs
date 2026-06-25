@@ -171,13 +171,14 @@ async fn handle_messages_for_app(
                 ctx.provider = provider;
             }
             ctx.provider_key_id = err.key_id.take();
-            log_forward_error(&state, &ctx, is_stream, &err.error);
+            log_forward_error(&state, &ctx, is_stream, &err);
             return Err(err.error);
         }
     };
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.decision_trace = super::forwarder::serialize_decision_trace(&result.decision_trace);
     ctx.provider = result.provider;
     ctx.provider_key_id = result.key_id;
     let api_format = result
@@ -266,6 +267,7 @@ async fn handle_claude_transform(
             let status_code = status.as_u16();
             let start_time = ctx.start_time;
             let session_id = ctx.session_id.clone();
+            let decision_trace = ctx.decision_trace.clone();
 
             Some(SseUsageCollector::new(
                 start_time,
@@ -284,6 +286,7 @@ async fn handle_claude_transform(
                         let request_model = request_model.clone();
                         let outbound_model = fallback_model.clone();
                         let session_id = session_id.clone();
+                        let decision_trace = decision_trace.clone();
 
                         tokio::spawn(async move {
                             log_usage(
@@ -300,6 +303,7 @@ async fn handle_claude_transform(
                                 true,
                                 status_code,
                                 Some(session_id),
+                                decision_trace,
                             )
                             .await;
                         });
@@ -428,6 +432,7 @@ async fn handle_claude_transform(
             let provider_id = ctx.provider.id.clone();
             let provider_key_id = ctx.provider_key_id.clone();
             let session_id = ctx.session_id.clone();
+            let decision_trace = ctx.decision_trace.clone();
             async move {
                 log_usage(
                     &state,
@@ -443,6 +448,7 @@ async fn handle_claude_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    decision_trace,
                 )
                 .await;
             }
@@ -533,14 +539,17 @@ pub async fn handle_chat_completions(
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
-            log_forward_error(&state, &ctx, is_stream, &err.error);
+            ctx.provider_key_id = err.key_id.take();
+            log_forward_error(&state, &ctx, is_stream, &err);
             return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
         }
     };
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.decision_trace = super::forwarder::serialize_decision_trace(&result.decision_trace);
     ctx.provider = result.provider;
+    ctx.provider_key_id = result.key_id;
     let response = result.response;
 
     process_response(
@@ -599,14 +608,17 @@ pub async fn handle_responses(
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
-            log_forward_error(&state, &ctx, is_stream, &err.error);
+            ctx.provider_key_id = err.key_id.take();
+            log_forward_error(&state, &ctx, is_stream, &err);
             return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
         }
     };
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.decision_trace = super::forwarder::serialize_decision_trace(&result.decision_trace);
     ctx.provider = result.provider;
+    ctx.provider_key_id = result.key_id;
     let response = result.response;
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
@@ -677,14 +689,17 @@ pub async fn handle_responses_compact(
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
-            log_forward_error(&state, &ctx, is_stream, &err.error);
+            ctx.provider_key_id = err.key_id.take();
+            log_forward_error(&state, &ctx, is_stream, &err);
             return build_codex_proxy_error_response(&ctx, &endpoint, &err.error);
         }
     };
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.decision_trace = super::forwarder::serialize_decision_trace(&result.decision_trace);
     ctx.provider = result.provider;
+    ctx.provider_key_id = result.key_id;
     let response = result.response;
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
@@ -743,6 +758,7 @@ async fn handle_codex_chat_to_responses_transform(
             let app_type_str = ctx.app_type_str;
             let start_time = ctx.start_time;
             let session_id = ctx.session_id.clone();
+            let decision_trace = ctx.decision_trace.clone();
 
             Some(SseUsageCollector::new(
                 start_time,
@@ -767,6 +783,7 @@ async fn handle_codex_chat_to_responses_transform(
                     let request_model = request_model.clone();
                     let outbound_model = fallback_model.clone();
                     let session_id = session_id.clone();
+                    let decision_trace = decision_trace.clone();
 
                     tokio::spawn(async move {
                         log_usage(
@@ -783,6 +800,7 @@ async fn handle_codex_chat_to_responses_transform(
                             true,
                             status.as_u16(),
                             Some(session_id),
+                            decision_trace,
                         )
                         .await;
                     });
@@ -881,6 +899,7 @@ async fn handle_codex_chat_to_responses_transform(
             let provider_key_id = ctx.provider_key_id.clone();
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
+            let decision_trace = ctx.decision_trace.clone();
             async move {
                 log_usage(
                     &state,
@@ -896,6 +915,7 @@ async fn handle_codex_chat_to_responses_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    decision_trace,
                 )
                 .await;
             }
@@ -1028,12 +1048,10 @@ fn build_codex_proxy_error_response(
     if let Some(secs) = error.retry_after_secs() {
         builder = builder.header(axum::http::header::RETRY_AFTER, secs);
     }
-    builder
-        .body(axum::body::Body::from(body))
-        .map_err(|e| {
-            log::error!("[Codex] 构建代理错误响应失败: {e}");
-            ProxyError::Internal(format!("Failed to build proxy error response: {e}"))
-        })
+    builder.body(axum::body::Body::from(body)).map_err(|e| {
+        log::error!("[Codex] 构建代理错误响应失败: {e}");
+        ProxyError::Internal(format!("Failed to build proxy error response: {e}"))
+    })
 }
 
 fn codex_proxy_error_json(
@@ -1253,14 +1271,17 @@ pub async fn handle_gemini(
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
-            log_forward_error(&state, &ctx, is_stream, &err.error);
+            ctx.provider_key_id = err.key_id.take();
+            log_forward_error(&state, &ctx, is_stream, &err);
             return Err(err.error);
         }
     };
 
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
+    ctx.decision_trace = super::forwarder::serialize_decision_trace(&result.decision_trace);
     ctx.provider = result.provider;
+    ctx.provider_key_id = result.key_id;
     let response = result.response;
 
     process_response(
@@ -1817,14 +1838,17 @@ fn log_forward_error(
     state: &ProxyState,
     ctx: &RequestContext,
     is_streaming: bool,
-    error: &ProxyError,
+    err: &super::forwarder::ForwardError,
 ) {
     use super::usage::logger::UsageLogger;
 
+    let error = &err.error;
     let logger = UsageLogger::new(&state.db);
     let status_code = map_proxy_error_to_status(error);
     let error_message = get_error_message(error);
     let request_id = uuid::Uuid::new_v4().to_string();
+    let decision_trace = super::forwarder::serialize_decision_trace(&err.decision_trace);
+    let upstream_error_body = super::forwarder::forward_error_upstream_body(err);
 
     if let Err(e) = logger.log_error_with_context(
         request_id,
@@ -1838,6 +1862,8 @@ fn log_forward_error(
         is_streaming,
         Some(ctx.session_id.clone()),
         None,
+        decision_trace,
+        upstream_error_body,
     ) {
         log::warn!("记录失败请求日志失败: {e}");
     }
@@ -1859,6 +1885,7 @@ async fn log_usage(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    decision_trace: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -1894,6 +1921,7 @@ async fn log_usage(
         session_id,
         None, // provider_type
         is_streaming,
+        decision_trace,
     ) {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
@@ -2431,7 +2459,6 @@ data: [DONE]\n\n";
         assert_eq!(anthropic["stop_reason"], "end_turn");
     }
 
-
     #[test]
     fn upstream_sse_response_always_uses_streaming_path() {
         assert!(should_use_claude_transform_streaming(false, true));
@@ -2441,10 +2468,6 @@ data: [DONE]\n\n";
     fn non_streaming_response_stays_non_streaming_for_regular_openai_responses() {
         assert!(!should_use_claude_transform_streaming(false, false));
     }
-
-
-
-
 
     #[test]
     fn codex_proxy_forward_error_includes_context_and_cause() {

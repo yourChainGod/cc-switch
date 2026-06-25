@@ -21,7 +21,7 @@ interface ApiKeySectionProps {
   disabled?: boolean;
   isPartner?: boolean;
   partnerPromotionKey?: string;
-  /** 新建场景：支持一次粘贴多个 Key，保存后自动组成 Key 池（仅 Claude 传入） */
+  /** 新建场景：支持一次粘贴多个 Key，保存后自动组成 Key 池 */
   supportsMultiKey?: boolean;
 }
 
@@ -51,23 +51,35 @@ export function ApiKeySection({
   };
 
   const finalPlaceholder = placeholder || defaultPlaceholder;
+  const isBulkKeyInput = Boolean(
+    supportsMultiKey && !keyPool && category !== "official",
+  );
 
   return (
     <div className="space-y-1">
       <ApiKeyInput
         id={id}
-        label={label}
+        label={
+          isBulkKeyInput
+            ? t("providerForm.apiKeys", { defaultValue: "API Keys" })
+            : label
+        }
         value={value}
         onChange={onChange}
         placeholder={
-          category === "official"
-            ? finalPlaceholder.official
-            : finalPlaceholder.thirdParty
+          isBulkKeyInput
+            ? t("providerForm.multiKeyPlaceholder", {
+                defaultValue: "每行粘贴一个 Key，也可用空格、逗号分隔",
+              })
+            : category === "official"
+              ? finalPlaceholder.official
+              : finalPlaceholder.thirdParty
         }
         disabled={disabled ?? category === "official"}
+        multiline={isBulkKeyInput}
       />
       {/* 新建场景（无 Key 池上下文）：提示可粘贴多个 Key 自动组池 */}
-      {supportsMultiKey && !keyPool && category !== "official" && (
+      {isBulkKeyInput && (
         <p className="pl-1 text-xs text-muted-foreground">
           {t("providerForm.multiKeyHint", {
             defaultValue:

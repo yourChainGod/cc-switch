@@ -3,6 +3,7 @@ import {
   extractCodexBaseUrl,
   extractCodexExperimentalBearerToken,
   setCodexBaseUrl as setCodexBaseUrlInConfig,
+  splitApiKeys,
   updateCodexExperimentalBearerToken,
 } from "@/utils/providerConfigUtils";
 import { normalizeTomlText } from "@/utils/textNormalization";
@@ -124,7 +125,12 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
       parsed = null;
     }
     const extractedKey = pickCodexApiKey(parsed, codexConfig);
-    setCodexApiKey((prev) => (prev === extractedKey ? prev : extractedKey));
+    setCodexApiKey((prev) => {
+      const firstOfCurrent = splitApiKeys(prev)[0] ?? "";
+      return prev === extractedKey || firstOfCurrent === extractedKey
+        ? prev
+        : extractedKey;
+    });
   }, [codexAuth, codexConfig]);
 
   // 验证 Codex Auth JSON
@@ -167,17 +173,17 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
   // 也一并更新/清除——否则用户清空输入框会被 pickCodexApiKey 的 fallback 又填回去
   const handleCodexApiKeyChange = useCallback(
     (key: string) => {
-      const trimmed = key.trim();
-      setCodexApiKey(trimmed);
+      const configKey = splitApiKeys(key)[0] ?? "";
+      setCodexApiKey(key);
       try {
         const auth = JSON.parse(codexAuth || "{}");
-        auth.OPENAI_API_KEY = trimmed;
+        auth.OPENAI_API_KEY = configKey;
         setCodexAuth(JSON.stringify(auth, null, 2));
       } catch {
         // ignore
       }
       setCodexConfig((prev) =>
-        updateCodexExperimentalBearerToken(prev, trimmed),
+        updateCodexExperimentalBearerToken(prev, configKey),
       );
     },
     [codexAuth, setCodexAuth, setCodexConfig],

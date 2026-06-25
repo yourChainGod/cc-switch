@@ -1083,7 +1083,10 @@ mod tests {
             "data: {\"error\":{\"code\":429,\"message\":\"Resource has been exhausted\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n",
         ]);
 
-        assert!(output.contains("event: error"), "missing error event: {output}");
+        assert!(
+            output.contains("event: error"),
+            "missing error event: {output}"
+        );
         assert!(output.contains("\"type\":\"RESOURCE_EXHAUSTED\""));
         assert!(output.contains("\"message\":\"Resource has been exhausted\""));
         assert!(!output.contains("event: message_delta"));
@@ -1116,7 +1119,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
 
-        assert!(output.contains("event: error"), "missing error event: {output}");
+        assert!(
+            output.contains("event: error"),
+            "missing error event: {output}"
+        );
         assert!(output.contains("\"type\":\"stream_error\""));
         assert!(output.contains("connection reset by upstream"));
         assert!(!output.contains("event: message_stop"));

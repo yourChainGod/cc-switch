@@ -25,6 +25,7 @@ import {
   showFetchModelsError,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
+import { splitApiKeys } from "@/utils/providerConfigUtils";
 import type {
   CodexApiFormat,
   CodexCatalogModel,
@@ -208,15 +209,16 @@ export function CodexFormFields({
   );
 
   const handleFetchModels = useCallback(() => {
-    if (!codexBaseUrl || !codexApiKey) {
+    const fetchApiKey = splitApiKeys(codexApiKey)[0] ?? "";
+    if (!codexBaseUrl || !fetchApiKey) {
       showFetchModelsError(null, t, {
-        hasApiKey: !!codexApiKey,
+        hasApiKey: !!fetchApiKey,
         hasBaseUrl: !!codexBaseUrl,
       });
       return;
     }
     setIsFetchingModels(true);
-    fetchModelsForConfig(codexBaseUrl, codexApiKey, isFullUrl)
+    fetchModelsForConfig(codexBaseUrl, fetchApiKey, isFullUrl)
       .then((models) => {
         setFetchedModels(models);
         if (models.length === 0) {
@@ -303,6 +305,7 @@ export function CodexFormFields({
             defaultValue: "输入 API Key，将自动填充到配置",
           }),
         }}
+        supportsMultiKey
       />
 
       {/* Codex Base URL 输入框 */}

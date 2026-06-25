@@ -795,7 +795,10 @@ mod tests {
 
             let written = fs::read_to_string(config_path).unwrap();
             // provider 子树之外的注释与键序必须原样保留
-            assert!(written.contains("// schema comment"), "注释应保留: {written}");
+            assert!(
+                written.contains("// schema comment"),
+                "注释应保留: {written}"
+            );
             assert!(
                 written.contains("// provider comment"),
                 "注释应保留: {written}"

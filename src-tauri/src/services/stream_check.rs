@@ -1026,10 +1026,8 @@ impl StreamCheckService {
         config: &StreamCheckConfig,
     ) -> String {
         match app_type {
-            AppType::Claude => {
-                Self::extract_env_model(provider, "ANTHROPIC_MODEL")
-                    .unwrap_or_else(|| config.claude_model.clone())
-            }
+            AppType::Claude => Self::extract_env_model(provider, "ANTHROPIC_MODEL")
+                .unwrap_or_else(|| config.claude_model.clone()),
             AppType::Codex => {
                 Self::extract_codex_model(provider).unwrap_or_else(|| config.codex_model.clone())
             }
@@ -1440,8 +1438,6 @@ mod tests {
 
         assert_eq!(url, "https://relay.example/v1/chat/completions");
     }
-
-
 
     #[test]
     fn test_resolve_claude_stream_url_for_openai_chat() {

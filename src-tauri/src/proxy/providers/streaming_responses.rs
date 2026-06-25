@@ -1360,7 +1360,10 @@ mod tests {
             e.get("type").and_then(|v| v.as_str()) == Some("content_block_start")
                 && e.pointer("/content_block/type").and_then(|v| v.as_str()) == Some("thinking")
         });
-        assert!(thinking_start.is_some(), "missing thinking content_block_start");
+        assert!(
+            thinking_start.is_some(),
+            "missing thinking content_block_start"
+        );
         let thinking_deltas: Vec<&str> = events
             .iter()
             .filter(|e| e.pointer("/delta/type").and_then(|v| v.as_str()) == Some("thinking_delta"))
@@ -1381,7 +1384,10 @@ mod tests {
             e.get("type").and_then(|v| v.as_str()) == Some("content_block_start")
                 && e.pointer("/content_block/type").and_then(|v| v.as_str()) == Some("text")
         });
-        assert!(thinking_stop.is_some(), "missing thinking content_block_stop");
+        assert!(
+            thinking_stop.is_some(),
+            "missing thinking content_block_stop"
+        );
         assert!(text_start.is_some(), "missing text content_block_start");
         assert!(thinking_stop.unwrap() < text_start.unwrap());
         assert!(merged.contains("\"text\":\"42\""));

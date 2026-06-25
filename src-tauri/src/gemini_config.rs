@@ -722,12 +722,11 @@ KEY_WITH-DASH=value";
             let settings_path = get_gemini_settings_path();
             fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
             // 模拟用户手写时多打了一个逗号（serde_json 不接受尾随逗号）
-            let corrupted =
-                "{\n  \"theme\": \"dark\",\n  \"mcpServers\": { \"context7\": {} },\n}";
+            let corrupted = "{\n  \"theme\": \"dark\",\n  \"mcpServers\": { \"context7\": {} },\n}";
             fs::write(&settings_path, corrupted).unwrap();
 
-            let err = write_packycode_settings()
-                .expect_err("解析失败时必须返回错误，而不是清空重写");
+            let err =
+                write_packycode_settings().expect_err("解析失败时必须返回错误，而不是清空重写");
             let msg = err.to_string();
             assert!(
                 msg.contains(&settings_path.display().to_string()),

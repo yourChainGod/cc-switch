@@ -762,10 +762,7 @@ mod ensure_official_seed_tests {
         assert!(inserted, "should insert when missing");
 
         let provider = db
-            .get_provider_by_id(
-                "claude-official",
-                AppType::Claude.as_str(),
-            )
+            .get_provider_by_id("claude-official", AppType::Claude.as_str())
             .expect("query ok")
             .expect("provider exists after ensure");
 
@@ -782,10 +779,7 @@ mod ensure_official_seed_tests {
         db.init_default_official_providers().expect("seed");
 
         let mut renamed = db
-            .get_provider_by_id(
-                "claude-official",
-                AppType::Claude.as_str(),
-            )
+            .get_provider_by_id("claude-official", AppType::Claude.as_str())
             .expect("query ok")
             .expect("seed present");
         renamed.name = "My Custom Backup".to_string();
@@ -798,10 +792,7 @@ mod ensure_official_seed_tests {
         assert!(!inserted, "should skip when present");
 
         let after = db
-            .get_provider_by_id(
-                "claude-official",
-                AppType::Claude.as_str(),
-            )
+            .get_provider_by_id("claude-official", AppType::Claude.as_str())
             .expect("query ok")
             .expect("still present");
         assert_eq!(
@@ -820,8 +811,7 @@ mod ensure_official_seed_tests {
     #[test]
     fn ensure_rejects_seed_app_type_mismatch() {
         let db = Database::memory().expect("memory db");
-        let result =
-            db.ensure_official_seed_by_id("claude-official", AppType::Codex);
+        let result = db.ensure_official_seed_by_id("claude-official", AppType::Codex);
         assert!(result.is_err(), "(id, app_type) mismatch should be Err");
     }
 }

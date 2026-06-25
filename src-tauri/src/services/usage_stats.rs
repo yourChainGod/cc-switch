@@ -151,6 +151,12 @@ pub struct RequestLogDetail {
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_source: Option<String>,
+    /// 决策链 JSON（仅多尝试请求有值，且仅详情接口返回；列表接口恒为 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_trace: Option<String>,
+    /// 失败时上游返回的错误响应体原文（仅详情接口返回）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_error_body: Option<String>,
 }
 
 /// 把 25 列的查询结果映射为 `RequestLogDetail`。
@@ -193,6 +199,9 @@ fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
         error_message: row.get(22)?,
         created_at: row.get(23)?,
         data_source: row.get(24)?,
+        // 列表查询不返回决策链 / 上游错误体（大字段，仅详情接口按需取）。
+        decision_trace: None,
+        upstream_error_body: None,
     })
 }
 
@@ -1327,12 +1336,19 @@ impl Database {
                     l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
                     l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd, l.cache_creation_cost_usd, l.total_cost_usd,
                     l.is_streaming, l.latency_ms, l.first_token_ms, l.duration_ms,
-                    l.status_code, l.error_message, l.created_at, l.data_source
+                    l.status_code, l.error_message, l.created_at, l.data_source,
+                    l.decision_trace, l.upstream_error_body
              FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              WHERE l.request_id = ?"
         );
-        let result = conn.query_row(&detail_sql, [request_id], row_to_request_log_detail);
+        // 详情接口在 25 列基础映射之上额外取决策链 / 上游错误体两列（仅详情返回）。
+        let result = conn.query_row(&detail_sql, [request_id], |row| {
+            let mut detail = row_to_request_log_detail(row)?;
+            detail.decision_trace = row.get(25)?;
+            detail.upstream_error_body = row.get(26)?;
+            Ok(detail)
+        });
 
         match result {
             Ok(mut detail) => {

@@ -1757,7 +1757,10 @@ fn provider_key_usage_script_roundtrip_and_isolated_from_updates() {
         after_update.usage_script.is_some(),
         "update_provider_key must NOT wipe usage_script (切 key/调优先级不漂移用量配置)"
     );
-    assert_eq!(after_update.usage_script.as_ref().unwrap().timeout, Some(15));
+    assert_eq!(
+        after_update.usage_script.as_ref().unwrap().timeout,
+        Some(15)
+    );
 
     // set_provider_key_usage_script(None) 显式清除，且不动其他字段
     db.set_provider_key_usage_script(app_type, "provider-a", &key.id, None)
@@ -1815,16 +1818,14 @@ fn provider_key_summary_counts_usage_enabled_keys() {
         ..enabled_usage.clone()
     };
 
-    let mk = |name: &str, key: &str, priority: i64, usage: Option<UsageScript>| {
-        ProviderKeyInput {
-            name: name.to_string(),
-            key_value: key.to_string(),
-            auth_field: None,
-            enabled: true,
-            priority,
-            weight: 1,
-            usage_script: usage,
-        }
+    let mk = |name: &str, key: &str, priority: i64, usage: Option<UsageScript>| ProviderKeyInput {
+        name: name.to_string(),
+        key_value: key.to_string(),
+        auth_field: None,
+        enabled: true,
+        priority,
+        weight: 1,
+        usage_script: usage,
     };
 
     db.add_provider_key(

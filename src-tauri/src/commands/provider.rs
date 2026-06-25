@@ -623,12 +623,7 @@ pub fn setProviderKeyUsageScript(
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     state
         .db
-        .set_provider_key_usage_script(
-            app_type.as_str(),
-            &providerId,
-            &keyId,
-            usageScript.as_ref(),
-        )
+        .set_provider_key_usage_script(app_type.as_str(), &providerId, &keyId, usageScript.as_ref())
         .map_err(|e| e.to_string())
 }
 

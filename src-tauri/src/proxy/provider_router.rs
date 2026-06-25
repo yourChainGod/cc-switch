@@ -7,6 +7,7 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::{apply_provider_key_to_config, Provider, ProviderKey};
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -268,21 +269,37 @@ impl ProviderRouter {
             .collect())
     }
 
-    /// 通道排序：优先级 → 连续失败少 → 最久未用（LRU 轮转）。
-    /// 同优先级的 key 之间自然轮换，无需权重概念。
+    /// 通道排序：优先级 → 连续失败少 → 同层随机。
+    /// 同优先级、同失败层的 key 每次请求打散，避免固定前排 key 反复被打满。
     fn apply_key_order(keys: &mut [ProviderKey]) {
-        keys.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then_with(|| a.consecutive_failures.cmp(&b.consecutive_failures))
-                .then_with(|| {
-                    a.last_used_at
-                        .unwrap_or(0)
-                        .cmp(&b.last_used_at.unwrap_or(0))
-                })
-                .then_with(|| a.created_at.cmp(&b.created_at))
-                .then_with(|| a.id.cmp(&b.id))
+        let nonce = uuid::Uuid::new_v4().to_string();
+        Self::apply_key_order_with_nonce(keys, nonce.as_bytes());
+    }
+
+    fn apply_key_order_with_nonce(keys: &mut [ProviderKey], nonce: &[u8]) {
+        keys.sort_by_cached_key(|key| {
+            (
+                key.priority,
+                key.consecutive_failures,
+                Self::key_random_tie_breaker(nonce, key),
+                key.last_used_at.unwrap_or(0),
+                key.created_at,
+                key.id.clone(),
+            )
         });
+    }
+
+    fn key_random_tie_breaker(nonce: &[u8], key: &ProviderKey) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(nonce);
+        hasher.update([0]);
+        hasher.update(key.provider_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(key.id.as_bytes());
+        let digest = hasher.finalize();
+        let mut value = [0u8; 32];
+        value.copy_from_slice(&digest);
+        value
     }
 
     /// 请求执行前获取熔断器“放行许可”
@@ -596,6 +613,7 @@ impl ProviderRouter {
 mod tests {
     use super::*;
     use crate::database::Database;
+    use crate::provider::ProviderKeyStatus;
     use serde_json::{json, Value};
     use serial_test::serial;
     use std::env;
@@ -646,6 +664,29 @@ mod tests {
                 Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
                 None => env::remove_var("CC_SWITCH_TEST_HOME"),
             }
+        }
+    }
+
+    fn provider_key_fixture(id: &str, priority: i64, consecutive_failures: i64) -> ProviderKey {
+        ProviderKey {
+            id: id.to_string(),
+            app_type: "claude".to_string(),
+            provider_id: "provider".to_string(),
+            name: id.to_string(),
+            key_value: format!("sk-{id}"),
+            auth_field: Some("ANTHROPIC_AUTH_TOKEN".to_string()),
+            enabled: true,
+            priority,
+            weight: 1,
+            status: ProviderKeyStatus::Active,
+            consecutive_failures,
+            last_success_at: None,
+            last_failure_at: None,
+            last_used_at: None,
+            cooldown_until: None,
+            usage_script: None,
+            created_at: 0,
+            updated_at: 0,
         }
     }
 
@@ -759,7 +800,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_provider_key_pool_uses_lru_schedule_with_same_priority() {
+    async fn test_provider_key_pool_prioritizes_health_before_randomization() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
         let now = chrono::Utc::now().timestamp();
@@ -812,6 +853,7 @@ mod tests {
             .get_provider_key("claude", "a", &stale.id)
             .unwrap()
             .unwrap();
+        stale_key.consecutive_failures = 1;
         stale_key.last_used_at = Some(now - 60);
         db.save_provider_key(&stale_key).unwrap();
 
@@ -825,10 +867,30 @@ mod tests {
         let router = ProviderRouter::new(db.clone());
         let attempts = router.select_providers("claude").await.unwrap();
 
-        // 同优先级按最久未用轮转，weight 不再参与调度
+        // 连续失败更少的 key 先尝试；同层随机只在健康度相同的 key 之间生效。
         assert_eq!(attempts.len(), 2);
-        assert_eq!(attempts[0].key_id.as_deref(), Some(stale.id.as_str()));
-        assert_eq!(attempts[1].key_id.as_deref(), Some(fresh.id.as_str()));
+        assert_eq!(attempts[0].key_id.as_deref(), Some(fresh.id.as_str()));
+        assert_eq!(attempts[1].key_id.as_deref(), Some(stale.id.as_str()));
+    }
+
+    #[test]
+    fn test_provider_key_order_randomizes_same_health_bucket() {
+        let mut keys = vec![
+            provider_key_fixture("key-a", 10, 0),
+            provider_key_fixture("key-b", 10, 0),
+        ];
+
+        ProviderRouter::apply_key_order_with_nonce(&mut keys, b"right");
+        assert_eq!(
+            keys.iter().map(|key| key.id.as_str()).collect::<Vec<_>>(),
+            vec!["key-a", "key-b"]
+        );
+
+        ProviderRouter::apply_key_order_with_nonce(&mut keys, b"left");
+        assert_eq!(
+            keys.iter().map(|key| key.id.as_str()).collect::<Vec<_>>(),
+            vec!["key-b", "key-a"]
+        );
     }
 
     #[tokio::test]

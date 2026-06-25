@@ -413,9 +413,7 @@ pub(crate) fn remove_common_config_from_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode => {
-            Ok(settings.clone())
-        }
+        AppType::OpenCode => Ok(settings.clone()),
     }
 }
 
@@ -470,9 +468,7 @@ fn apply_common_config_to_settings(
             }
             Ok(result)
         }
-        AppType::OpenCode => {
-            Ok(settings.clone())
-        }
+        AppType::OpenCode => Ok(settings.clone()),
     }
 }
 

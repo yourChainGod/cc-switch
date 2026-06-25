@@ -32,6 +32,10 @@ pub struct RequestLog {
     pub is_streaming: bool,
     /// 成本倍数
     pub cost_multiplier: String,
+    /// 决策链 JSON（仅多尝试请求写入；序列化自 forwarder 的 Vec<DecisionStep>）
+    pub decision_trace: Option<String>,
+    /// 失败时上游返回的错误响应体原文（仅失败请求写入）
+    pub upstream_error_body: Option<String>,
 }
 
 /// 使用量记录器
@@ -75,8 +79,9 @@ impl<'a> UsageLogger<'a> {
                 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                 input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
                 latency_ms, first_token_ms, status_code, error_message, session_id,
-                provider_type, is_streaming, cost_multiplier, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                provider_type, is_streaming, cost_multiplier, created_at,
+                decision_trace, upstream_error_body
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
             rusqlite::params![
                 log.request_id,
                 log.provider_id,
@@ -103,6 +108,8 @@ impl<'a> UsageLogger<'a> {
                 log.is_streaming as i64,
                 log.cost_multiplier,
                 created_at,
+                log.decision_trace,
+                log.upstream_error_body,
             ],
         )
         .map_err(|e| AppError::Database(format!("记录请求日志失败: {e}")))?;
@@ -146,6 +153,8 @@ impl<'a> UsageLogger<'a> {
             provider_type: None,
             is_streaming: false,
             cost_multiplier: "1.0".to_string(),
+            decision_trace: None,
+            upstream_error_body: None,
         };
 
         self.log_request(&log)
@@ -168,6 +177,8 @@ impl<'a> UsageLogger<'a> {
         is_streaming: bool,
         session_id: Option<String>,
         provider_type: Option<String>,
+        decision_trace: Option<String>,
+        upstream_error_body: Option<String>,
     ) -> Result<(), AppError> {
         let request_model = model.clone();
         let log = RequestLog {
@@ -188,6 +199,8 @@ impl<'a> UsageLogger<'a> {
             provider_type,
             is_streaming,
             cost_multiplier: "1.0".to_string(),
+            decision_trace,
+            upstream_error_body,
         };
 
         self.log_request(&log)
@@ -213,14 +226,13 @@ impl<'a> UsageLogger<'a> {
         provider_id: &str,
         app_type: &str,
     ) -> (Decimal, String) {
-        let default_multiplier_raw =
-            match self.db.get_default_cost_multiplier(app_type).await {
-                Ok(value) => value,
-                Err(e) => {
-                    log::warn!("[USG-003] 获取默认倍率失败 (app_type={app_type}): {e}");
-                    "1".to_string()
-                }
-            };
+        let default_multiplier_raw = match self.db.get_default_cost_multiplier(app_type).await {
+            Ok(value) => value,
+            Err(e) => {
+                log::warn!("[USG-003] 获取默认倍率失败 (app_type={app_type}): {e}");
+                "1".to_string()
+            }
+        };
         let default_multiplier = match Decimal::from_str(&default_multiplier_raw) {
             Ok(value) => value,
             Err(e) => {
@@ -231,14 +243,13 @@ impl<'a> UsageLogger<'a> {
             }
         };
 
-        let default_pricing_source_raw =
-            match self.db.get_pricing_model_source(app_type).await {
-                Ok(value) => value,
-                Err(e) => {
-                    log::warn!("[USG-003] 获取默认计费模式失败 (app_type={app_type}): {e}");
-                    PRICING_SOURCE_RESPONSE.to_string()
-                }
-            };
+        let default_pricing_source_raw = match self.db.get_pricing_model_source(app_type).await {
+            Ok(value) => value,
+            Err(e) => {
+                log::warn!("[USG-003] 获取默认计费模式失败 (app_type={app_type}): {e}");
+                PRICING_SOURCE_RESPONSE.to_string()
+            }
+        };
         let default_pricing_source = if default_pricing_source_raw == PRICING_SOURCE_RESPONSE
             || default_pricing_source_raw == PRICING_SOURCE_REQUEST
         {
@@ -313,6 +324,7 @@ impl<'a> UsageLogger<'a> {
         session_id: Option<String>,
         provider_type: Option<String>,
         is_streaming: bool,
+        decision_trace: Option<String>,
     ) -> Result<(), AppError> {
         let pricing = self.get_model_pricing(&pricing_model)?;
 
@@ -350,6 +362,8 @@ impl<'a> UsageLogger<'a> {
             provider_type,
             is_streaming,
             cost_multiplier: cost_multiplier.to_string(),
+            decision_trace,
+            upstream_error_body: None,
         };
 
         self.log_request(&log)
@@ -402,6 +416,7 @@ mod tests {
             None,
             Some("claude".to_string()),
             false,
+            None,
         )?;
 
         // 验证记录已插入

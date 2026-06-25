@@ -843,17 +843,22 @@ mod tests {
                     row.get(0)
                 })?;
             assert_eq!(affinity, 1, "local session affinity should be preserved");
-            let working: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM working_channel_affinity",
-                [],
-                |row| row.get(0),
-            )?;
-            assert_eq!(working, 1, "local working channel affinity should be preserved");
+            let working: i64 =
+                conn.query_row("SELECT COUNT(*) FROM working_channel_affinity", [], |row| {
+                    row.get(0)
+                })?;
+            assert_eq!(
+                working, 1,
+                "local working channel affinity should be preserved"
+            );
             let log_sync: i64 =
                 conn.query_row("SELECT COUNT(*) FROM session_log_sync", [], |row| {
                     row.get(0)
                 })?;
-            assert_eq!(log_sync, 1, "local session log sync state should be preserved");
+            assert_eq!(
+                log_sync, 1,
+                "local session log sync state should be preserved"
+            );
 
             // 远端 key 配置同步进来，但运行时健康状态被重置
             let (status, failures, cooldown): (String, i64, Option<i64>) = conn.query_row(

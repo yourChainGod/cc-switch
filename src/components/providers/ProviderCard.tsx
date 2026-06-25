@@ -1,6 +1,15 @@
 import { memo, useMemo, useState, useEffect } from "react";
-import { GripVertical, ChevronDown, ChevronUp, Route } from "lucide-react";
+import {
+  GripVertical,
+  ChevronDown,
+  ChevronUp,
+  Route,
+  TimerOff,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { providersApi } from "@/lib/api/providers";
 import type {
   DraggableAttributes,
   DraggableSyntheticListeners,
@@ -247,6 +256,9 @@ function ProviderCardImpl({
   const keyIssueCount = keySummary
     ? keySummary.degraded + keySummary.cooldown + keySummary.disabled
     : 0;
+  const resetKeyCooldownLabel = t("providerKeys.resetCooldownTooltip", {
+    defaultValue: "重置该供应商全部 Key 的冷却与失败计数，使其恢复可用",
+  });
 
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -255,6 +267,31 @@ function ProviderCardImpl({
       setIsExpanded(true);
     }
   }, [hasMultiplePlans]);
+
+  const queryClient = useQueryClient();
+  const { mutate: resetKeyCooldown, isPending: isResettingCooldown } =
+    useMutation({
+      mutationFn: () => providersApi.resetAllKeysHealth(appId, provider.id),
+      onSuccess: async (count) => {
+        await queryClient.invalidateQueries({
+          queryKey: ["providerKeySummaries", appId],
+        });
+        toast.success(
+          t("providerKeys.resetAllDone", {
+            count,
+            defaultValue: "Reset health state for {{count}} keys",
+          }),
+        );
+      },
+      onError: (error) => {
+        console.error("Failed to reset provider keys:", error);
+        toast.error(
+          t("providerKeys.resetFailed", {
+            defaultValue: "Failed to reset provider key",
+          }),
+        );
+      },
+    });
 
   const handleOpenWebsite = () => {
     if (!isClickableUrl) {
@@ -446,7 +483,7 @@ function ProviderCardImpl({
               {hasKeyPool && keySummary && (
                 <span
                   className={cn(
-                    "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold",
+                    "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold",
                     keyIssueCount > 0
                       ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
                       : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
@@ -473,6 +510,30 @@ function ProviderCardImpl({
                         available: keySummary.available,
                         defaultValue: "Key {{available}}/{{total}}",
                       })}
+                  {keyIssueCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        resetKeyCooldown();
+                      }}
+                      disabled={isResettingCooldown}
+                      aria-label={resetKeyCooldownLabel}
+                      title={resetKeyCooldownLabel}
+                      className={cn(
+                        "-mr-0.5 rounded p-0.5 text-current opacity-70 transition-colors hover:bg-current/10 hover:opacity-100",
+                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-current",
+                        "disabled:pointer-events-none disabled:opacity-40",
+                      )}
+                    >
+                      <TimerOff
+                        className={cn(
+                          "h-3 w-3",
+                          isResettingCooldown && "animate-pulse",
+                        )}
+                      />
+                    </button>
+                  )}
                 </span>
               )}
             </div>

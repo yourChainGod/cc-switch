@@ -164,7 +164,10 @@ mod tests {
     #[test]
     fn prefix_match() {
         let rules = vec![rule(MatchType::Prefix, "claude-", "my-claude")];
-        assert_eq!(resolve(&rules, "claude-sonnet-4-6").unwrap().target, "my-claude");
+        assert_eq!(
+            resolve(&rules, "claude-sonnet-4-6").unwrap().target,
+            "my-claude"
+        );
         assert!(resolve(&rules, "gpt-claude").is_none());
     }
 

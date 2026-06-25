@@ -296,12 +296,11 @@ pub(crate) fn build_anthropic_usage_from_responses(usage: Option<&Value>) -> Val
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     if cached > 0 || cache_creation > 0 {
-        result["input_tokens"] =
-            json!(super::transform::input_tokens_excluding_cache(
-                input,
-                cached,
-                cache_creation
-            ));
+        result["input_tokens"] = json!(super::transform::input_tokens_excluding_cache(
+            input,
+            cached,
+            cache_creation
+        ));
     }
 
     result

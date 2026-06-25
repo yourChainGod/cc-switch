@@ -177,6 +177,8 @@
     "summary": "Key {{available}}/{{total}}",
     "summaryWithIssues": "Key {{total}} / {{issues}} issues",
     "summaryTooltip": "{{available}}/{{total}} keys available. Degraded: {{degraded}}, cooldown: {{cooldown}}, disabled: {{disabled}}. Best priority: {{priority}}.",
+    "resetCooldown": "Reset cooldown",
+    "resetCooldownTooltip": "Reset cooldown and failure counts for all keys of this provider, restoring them to available",
     "empty": "No provider keys configured",
     "configKey": "Config key",
     "configMode": {
@@ -1394,6 +1396,15 @@
     "performance": "Performance",
     "latency": "Latency",
     "errorMessage": "Error Message",
+    "decisionChain": "Decision Chain",
+    "upstreamErrorBody": "Upstream Raw Error",
+    "failoverSwitch": "Failover Switch",
+    "decisionOutcome": {
+      "success": "Success",
+      "failed": "Failed",
+      "skipped_circuit_breaker": "Skipped (Circuit Breaker)",
+      "pending": "Pending"
+    },
     "requests": "Requests",
     "tokens": "Tokens",
     "avgCost": "Average Cost",
