@@ -45,8 +45,6 @@ export interface DecisionStep {
   outcome: "success" | "failed" | "skipped_circuit_breaker" | "pending";
   statusCode?: number;
   error?: string;
-  retryKind?: string;
-  isFailoverSwitch: boolean;
 }
 
 export interface SessionSyncResult {

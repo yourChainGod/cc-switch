@@ -97,23 +97,25 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Rename assets with fork suffix + write platform download table
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eo pipefail
           TAG="${GITHUB_REF_NAME}"
-          FULL="${TAG#v}"            # 3.16.1-fork-2
-          BASE="${FULL%%-fork-*}"    # 3.16.1
+          FULL="${TAG#v}"                 # 3.16.1-fork-4
+          INTERNAL="$(node -p 'require("./package.json").version')"  # 3.16.104
           REPO="${GITHUB_REPOSITORY}"
 
-          # 1) 带 fork 后缀时，把产物名里的干净版本号替换成带后缀的完整版本
-          if [ "$FULL" != "$BASE" ]; then
+          # 1) 带 fork 后缀时，把产物名里的内部标准版本号替换成完整 tag 版本
+          if [ "$FULL" != "$INTERNAL" ]; then
             gh api "/repos/$REPO/releases/tags/$TAG" --jq '.assets[] | "\(.id)\t\(.name)"' \
             | while IFS=$'\t' read -r id name; do
                 case "$name" in
-                  *"$BASE"*)
-                    newname="${name/$BASE/$FULL}"
+                  *"$INTERNAL"*)
+                    newname="${name/$INTERNAL/$FULL}"
                     if [ "$newname" != "$name" ]; then
                       if gh api -X PATCH "/repos/$REPO/releases/assets/$id" -f name="$newname" >/dev/null; then
                         echo "renamed: $name -> $newname"
@@ -141,6 +143,12 @@ jobs:
             echo "## 下载 $TAG"
             echo
             echo "> macOS 包未签名，首次打开需在「系统设置 → 隐私与安全性」中允许。"
+            echo
+            echo "### 版本信息"
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| Release tag | \`$TAG\` |"
+            echo "| 内部构建版本 | \`$INTERNAL\` |"
             echo
             echo "### 🍎 macOS"
             echo "| 架构 | 下载 |"

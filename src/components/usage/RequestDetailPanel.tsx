@@ -124,16 +124,6 @@ function statusCodeBadgeClass(statusCode: number) {
   return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300";
 }
 
-function retryKindBadgeClass(kind: string) {
-  if (kind.startsWith("rectifier")) {
-    return "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-900/60 dark:bg-violet-950/35 dark:text-violet-300";
-  }
-  if (kind === "media") {
-    return "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900/60 dark:bg-cyan-950/35 dark:text-cyan-300";
-  }
-  return "border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300";
-}
-
 interface MetricTileProps {
   icon: ReactNode;
   label: string;
@@ -449,30 +439,6 @@ export function RequestDetailPanel({
     }
   };
   const requestKeyInfo = getKeyInfo(request.providerId, request.providerKeyId);
-  const retryKindLabel = (kind?: string) => {
-    switch (kind) {
-      case "anyrouter":
-      case "anyrouter_codex":
-        return t("usage.retryKind.sameChannel", {
-          defaultValue: "同通道重试",
-        });
-      case "media":
-        return t("usage.retryKind.media", {
-          defaultValue: "媒体重试",
-        });
-      case "rectifier":
-        return t("usage.retryKind.rectifier", {
-          defaultValue: "请求整流",
-        });
-      case "rectifier_budget":
-        return t("usage.retryKind.rectifierBudget", {
-          defaultValue: "整流预算",
-        });
-      default:
-        return null;
-    }
-  };
-
   return (
     <RequestDetailFrame
       title={detailTitle}
@@ -781,7 +747,6 @@ export function RequestDetailPanel({
               <ol className="relative space-y-3 before:absolute before:left-3 before:top-4 before:h-[calc(100%-2rem)] before:w-px before:bg-border/70">
                 {steps.map((step, idx) => {
                   const stepKeyInfo = getKeyInfo(step.providerId, step.keyId);
-                  const retryLabel = retryKindLabel(step.retryKind);
                   return (
                     <li
                       key={`${step.index}-${step.providerId}-${idx}`}
@@ -829,10 +794,7 @@ export function RequestDetailPanel({
                               </span>
                             )}
                           </div>
-                          {(stepKeyInfo ||
-                            retryLabel ||
-                            step.isFailoverSwitch ||
-                            step.error) && (
+                          {(stepKeyInfo || step.error) && (
                             <Collapsible className="flex min-w-0 flex-wrap items-center gap-2">
                               {stepKeyInfo && (
                                 <KeyBadge
@@ -841,26 +803,6 @@ export function RequestDetailPanel({
                                   onCopy={handleCopyKey}
                                   muted={!stepKeyInfo.resolved}
                                 />
-                              )}
-                              {retryLabel && step.retryKind && (
-                                <span
-                                  className={cn(
-                                    diagnosticPillClass,
-                                    retryKindBadgeClass(step.retryKind),
-                                  )}
-                                >
-                                  {retryLabel}
-                                </span>
-                              )}
-                              {step.isFailoverSwitch && (
-                                <span
-                                  className={cn(
-                                    diagnosticPillClass,
-                                    "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300",
-                                  )}
-                                >
-                                  {t("usage.failoverSwitch", "故障转移切换")}
-                                </span>
                               )}
                               {step.error && (
                                 <>

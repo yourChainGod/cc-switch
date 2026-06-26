@@ -72,11 +72,82 @@ pub struct DecisionStep {
     pub status_code: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// 同通道重试类型：anyrouter / media / anyrouter_codex / rectifier 等（仅重试步骤）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_kind: Option<String>,
-    /// 该步是否相对请求起始供应商发生了故障转移切换。
-    pub is_failover_switch: bool,
+}
+
+struct AnyrouterRetryState {
+    request_count: usize,
+    retry_count: u64,
+    remaining_wait_ms: u64,
+    rotating: bool,
+}
+
+enum AnyrouterRetryPlan {
+    Disabled,
+    Rotate,
+    Stop,
+}
+
+impl AnyrouterRetryState {
+    fn new(total_wait_ms: u64) -> Self {
+        Self {
+            request_count: 0,
+            retry_count: 0,
+            remaining_wait_ms: total_wait_ms,
+            rotating: false,
+        }
+    }
+
+    fn record_request(&mut self) {
+        self.request_count = self.request_count.saturating_add(1);
+    }
+
+    fn is_rotating(&self) -> bool {
+        self.rotating
+    }
+
+    async fn plan_next_rotation(
+        &mut self,
+        error: &ProxyError,
+        max_requests: usize,
+        app_type_str: &str,
+        provider_name: &str,
+        key_id: Option<&str>,
+    ) -> AnyrouterRetryPlan {
+        if max_requests == 0 {
+            return AnyrouterRetryPlan::Disabled;
+        }
+
+        if self.request_count >= max_requests {
+            log::warn!(
+                "[{app_type_str}] [anyrouter] 已达单请求总请求上限 ({}/{}), 停止轮转重试",
+                self.request_count,
+                max_requests
+            );
+            return AnyrouterRetryPlan::Stop;
+        }
+
+        let next_retry_count = self.retry_count.saturating_add(1);
+        let wait_ms = anyrouter_retry_wait_ms(error, next_retry_count);
+        if wait_ms > self.remaining_wait_ms {
+            log::warn!(
+                "[{app_type_str}] [anyrouter] 429/500/503 重试等待预算耗尽，停止轮转重试: provider={}, key_id={key_id:?}",
+                provider_name
+            );
+            return AnyrouterRetryPlan::Stop;
+        }
+
+        self.retry_count = next_retry_count;
+        self.remaining_wait_ms -= wait_ms;
+        self.rotating = true;
+        log::info!(
+            "[{app_type_str}] [anyrouter] 上游 429/500/503，{wait_ms}ms 后轮转重试（第 {} 次，已请求 {}/{})",
+            self.retry_count,
+            self.request_count,
+            max_requests
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+        AnyrouterRetryPlan::Rotate
+    }
 }
 
 /// 活跃连接 RAII guard
@@ -152,9 +223,9 @@ pub struct RequestForwarder {
     /// `max_attempts = max_retries + 1`，所以 max_retries=0 表示仅尝试一家、
     /// max_retries=3（默认）表示最多 4 家。loop 同时受 providers.len() 自然限制。
     max_attempts: usize,
-    /// anyrouter 429 同通道重试预算（次数 / 总等待毫秒）。
+    /// anyrouter 429/500/503 单个客户端请求的上游总请求上限 / 总等待毫秒。
     /// 刻意不受 max_attempts/max_retries 约束，常量给足；字段化仅为测试可覆写。
-    anyrouter_429_max_retries: usize,
+    anyrouter_429_max_attempts: usize,
     anyrouter_429_total_wait_ms: u64,
 }
 
@@ -259,7 +330,7 @@ impl RequestForwarder {
                 streaming_first_byte_timeout,
             ),
             max_attempts,
-            anyrouter_429_max_retries: ANYROUTER_RATE_LIMIT_MAX_RETRIES,
+            anyrouter_429_max_attempts: ANYROUTER_RATE_LIMIT_MAX_ATTEMPTS,
             anyrouter_429_total_wait_ms: ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS,
         }
     }
@@ -408,6 +479,38 @@ impl RequestForwarder {
         });
     }
 
+    fn append_decision_step(
+        decision_trace: &mut Vec<DecisionStep>,
+        provider: &Provider,
+        key_id: Option<&str>,
+    ) {
+        decision_trace.push(DecisionStep {
+            index: decision_trace.len() + 1,
+            provider_id: provider.id.clone(),
+            provider_name: provider.name.clone(),
+            key_id: key_id.map(str::to_string),
+            outcome: "pending".to_string(),
+            status_code: None,
+            error: None,
+        });
+    }
+
+    fn mark_last_decision_step_success(decision_trace: &mut [DecisionStep]) {
+        if let Some(step) = decision_trace.last_mut() {
+            step.outcome = "success".to_string();
+            step.status_code = Some(200);
+            step.error = None;
+        }
+    }
+
+    fn mark_last_decision_step_failed(decision_trace: &mut [DecisionStep], error: &ProxyError) {
+        if let Some(step) = decision_trace.last_mut() {
+            step.outcome = "failed".to_string();
+            step.status_code = upstream_status_code(error);
+            step.error = extract_error_message(error);
+        }
+    }
+
     /// 整流（thinking signature 或 budget）重试失败后的统一收尾。
     ///
     /// `None` 表示已记录熔断器、累积 `last_error`/`last_provider`，
@@ -428,11 +531,7 @@ impl RequestForwarder {
         decision_trace: &mut Vec<DecisionStep>,
     ) -> Option<ForwardError> {
         // 标记当前 attempt 的决策步骤为失败（携带重试后的最终错误）。
-        if let Some(step) = decision_trace.last_mut() {
-            step.outcome = "failed".to_string();
-            step.status_code = upstream_status_code(&retry_err);
-            step.error = Some(retry_err.to_string());
-        }
+        Self::mark_last_decision_step_failed(decision_trace, &retry_err);
         // Provider 错误：本家上游/网络确实出问题，下一家 provider 可能可用 → 继续故障转移。
         // 客户端错误：整流后请求仍违法，下一家也修不好 → 直接返回。
         let is_provider_error = match &retry_err {
@@ -635,10 +734,10 @@ impl RequestForwarder {
         let mut provider_blocked_by_failure = HashSet::new();
         // 决策链累加器：每次 provider/key 尝试（含熔断跳过）记一条，随结果流出落库。
         let mut decision_trace: Vec<DecisionStep> = Vec::new();
-        // anyrouter 429 同通道重试预算：独立于 max_retries 设置，整个请求内共享
-        //（多 key 轮转时各 key 的原地重试共用同一份预算，防止预算被放大 N 倍）。
-        let mut anyrouter_429_retry_budget = self.anyrouter_429_max_retries;
-        let mut anyrouter_429_wait_budget_ms = self.anyrouter_429_total_wait_ms;
+        // anyrouter 429/500/503 总请求预算：独立于 max_retries 设置，整个请求内共享。
+        // 命中瞬时错误后进入轮转模式，在 provider/key 列表间分摊尝试，避免首个 key
+        // 原地吃完 50 次预算。
+        let mut anyrouter_retry = AnyrouterRetryState::new(self.anyrouter_429_total_wait_ms);
 
         let total_channel_count = providers
             .iter()
@@ -650,13 +749,22 @@ impl RequestForwarder {
 
         // 依次尝试每个供应商 / Key。预算按通道去重统计；
         // 有 key 池时，每个 key 与单独 Provider 一样占用一次尝试预算。
-        for attempt in providers.iter() {
+        // anyrouter 瞬时错误会进入轮转模式，允许在总请求上限内多轮遍历同一组通道。
+        let mut provider_index = 0usize;
+        'attempts: while provider_index < providers.len() {
+            let attempt = &providers[provider_index];
+            provider_index += 1;
             let provider = &attempt.provider;
             let key_id = attempt.key_id.as_deref();
             let channel_id = attempt.channel_id();
             if provider_blocked_by_failure.contains(&provider.id) {
                 continue;
             }
+            let is_anyrouter = is_anyrouter_channel(
+                &provider.name,
+                &adapter.extract_base_url(provider).unwrap_or_default(),
+            );
+            let is_anyrouter_retry_step = anyrouter_retry.is_rotating() && is_anyrouter;
             // 整流器重试标记：每个 provider 独立持有，避免标记跨 provider 短路故障转移
             // —— 首家 provider 整流后被 5xx/timeout 击落时，下家仍能用整流后的请求体走整流流程
             let mut rectifier_retried = false;
@@ -667,8 +775,9 @@ impl RequestForwarder {
             // 上限检查：尊重用户在 AppProxyConfig.max_retries 上配置的「重试次数」。
             // 放在熔断器 allow 检查之前，避免在已经超限时还占用 HalfOpen 探测名额。
             let is_new_channel_attempt = !attempted_channel_ids.contains(&channel_id);
-            let beyond_max_attempts =
-                is_new_channel_attempt && attempted_channels >= self.max_attempts;
+            let beyond_max_attempts = is_new_channel_attempt
+                && attempted_channels >= self.max_attempts
+                && !is_anyrouter_retry_step;
 
             if beyond_max_attempts {
                 log::warn!(
@@ -700,9 +809,6 @@ impl RequestForwarder {
                     outcome: "skipped_circuit_breaker".to_string(),
                     status_code: None,
                     error: None,
-                    retry_kind: None,
-                    is_failover_switch: self.current_provider_id_at_start.as_str()
-                        != provider.id.as_str(),
                 });
                 continue;
             }
@@ -738,19 +844,11 @@ impl RequestForwarder {
                 status.current_provider_id = Some(provider.id.clone());
             }
 
-            // 决策链：为本次 attempt 记一条 pending 步骤，结局由后续 Ok/Err 回填。
-            decision_trace.push(DecisionStep {
-                index: decision_trace.len() + 1,
-                provider_id: provider.id.clone(),
-                provider_name: provider.name.clone(),
-                key_id: key_id.map(str::to_string),
-                outcome: "pending".to_string(),
-                status_code: None,
-                error: None,
-                retry_kind: None,
-                is_failover_switch: self.current_provider_id_at_start.as_str()
-                    != provider.id.as_str(),
-            });
+            // 决策链：为本次真实上游请求记一条 pending 步骤，结局由后续 Ok/Err 回填。
+            Self::append_decision_step(&mut decision_trace, provider, key_id);
+            if is_anyrouter {
+                anyrouter_retry.record_request();
+            }
 
             // 转发请求（每个 Provider 只尝试一次，重试由客户端控制）
             match self
@@ -768,10 +866,7 @@ impl RequestForwarder {
             {
                 Ok((response, claude_api_format, outbound_model)) => {
                     // 决策链：本次 attempt 成功，回填结局。
-                    if let Some(step) = decision_trace.last_mut() {
-                        step.outcome = "success".to_string();
-                        step.status_code = Some(200);
-                    }
+                    Self::mark_last_decision_step_success(&mut decision_trace);
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(
@@ -830,104 +925,12 @@ impl RequestForwarder {
                         connection_guard: None,
                     });
                 }
-                Err(mut e) => {
+                Err(e) => {
                     // 决策链：先把本次 attempt 标记为失败（带上游状态码/错误体）。
-                    // 若后续同通道重试成功，对应分支会把该步回填为 success。
-                    if let Some(step) = decision_trace.last_mut() {
-                        step.outcome = "failed".to_string();
-                        step.status_code = upstream_status_code(&e);
-                        step.error = extract_error_message(&e);
-                    }
-                    // anyrouter 429/500/503 特判：同通道高强度重试，预算独立于
-                    // AppProxyConfig.max_retries（该设置只管"换几家"，不管这里）。
-                    // 重试间隔尊重上游 Retry-After（封顶），否则短退避线性爬升。
-                    // anyrouter 限流/不可用是分钟级窗口 + 后端轮转，冷却/熔断只会把
-                    // 大概率马上恢复的通道踢出轮转，因此全程不标记冷却。
-                    let is_anyrouter = is_anyrouter_channel(
-                        &provider.name,
-                        &adapter.extract_base_url(provider).unwrap_or_default(),
-                    );
-                    if is_anyrouter && is_transient_upstream_error(&e) {
-                        let mut retry_round: u64 = 0;
-                        while anyrouter_429_retry_budget > 0 && is_transient_upstream_error(&e) {
-                            let wait_ms = match &e {
-                                ProxyError::UpstreamError {
-                                    retry_after: Some(ra),
-                                    ..
-                                } => ra
-                                    .saturating_mul(1000)
-                                    .min(ANYROUTER_RATE_LIMIT_RETRY_AFTER_CAP_SECS * 1000),
-                                _ => (ANYROUTER_RATE_LIMIT_RETRY_BASE_MS * (retry_round + 1))
-                                    .min(ANYROUTER_RATE_LIMIT_RETRY_MAX_MS),
-                            };
-                            if wait_ms > anyrouter_429_wait_budget_ms {
-                                log::warn!(
-                                    "[{app_type_str}] [anyrouter] 429/500/503 重试等待预算耗尽，转入故障转移: provider={}",
-                                    provider.name
-                                );
-                                break;
-                            }
-                            anyrouter_429_wait_budget_ms -= wait_ms;
-                            anyrouter_429_retry_budget -= 1;
-                            retry_round += 1;
-                            log::info!(
-                                "[{app_type_str}] [anyrouter] 上游 429/500/503，{wait_ms}ms 后同通道重试（第 {retry_round} 次，剩余预算 {anyrouter_429_retry_budget}）: provider={}",
-                                provider.name
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-
-                            match self
-                                .forward(
-                                    app_type,
-                                    &method,
-                                    provider,
-                                    endpoint,
-                                    &provider_body,
-                                    &headers,
-                                    &extensions,
-                                    adapter.as_ref(),
-                                )
-                                .await
-                            {
-                                Ok((response, claude_api_format, outbound_model)) => {
-                                    log::info!(
-                                        "[{app_type_str}] [anyrouter] 429/500/503 重试成功（共重试 {retry_round} 次）: provider={}",
-                                        provider.name
-                                    );
-                                    if let Some(step) = decision_trace.last_mut() {
-                                        step.outcome = "success".to_string();
-                                        step.status_code = Some(200);
-                                        step.retry_kind = Some("anyrouter".to_string());
-                                        step.error = None;
-                                    }
-                                    return Ok(self
-                                        .finalize_same_provider_retry_success(
-                                            response,
-                                            claude_api_format,
-                                            outbound_model,
-                                            provider,
-                                            attempt.key_id.clone(),
-                                            key_id,
-                                            app_type_str,
-                                            used_half_open_permit,
-                                            std::mem::take(&mut decision_trace),
-                                        )
-                                        .await);
-                                }
-                                Err(retry_err) => {
-                                    e = retry_err;
-                                    if let Some(step) = decision_trace.last_mut() {
-                                        step.outcome = "failed".to_string();
-                                        step.status_code = upstream_status_code(&e);
-                                        step.error = extract_error_message(&e);
-                                        step.retry_kind = Some("anyrouter".to_string());
-                                    }
-                                }
-                            }
-                        }
-                        // 仍是 429/500/503：落入下方通用分类，但不标记冷却（见
-                        // skip_failure_marking）；变成其他错误则按正常轨道处理。
-                    }
+                    // 后续重试会追加新的 step，保留这次失败的真实错误。
+                    Self::mark_last_decision_step_failed(&mut decision_trace, &e);
+                    // anyrouter 429/500/503 在下面的通用 Retryable 分支处理：
+                    // 不记冷却/熔断，并在总请求预算内轮转到下一条 provider/key。
 
                     // 检测是否需要触发整流器（仅 Claude/ClaudeAuth 供应商）
                     let provider_type = ProviderType::from_app_type_and_config(app_type, provider);
@@ -962,6 +965,7 @@ impl RequestForwarder {
                                 super::media_sanitizer::UNSUPPORTED_IMAGE_MARKER
                             );
 
+                            Self::append_decision_step(&mut decision_trace, provider, key_id);
                             match self
                                 .forward(
                                     app_type,
@@ -979,12 +983,7 @@ impl RequestForwarder {
                                     log::info!(
                                         "[{app_type_str}] [Media] Unsupported-image retry succeeded"
                                     );
-                                    if let Some(step) = decision_trace.last_mut() {
-                                        step.outcome = "success".to_string();
-                                        step.status_code = Some(200);
-                                        step.retry_kind = Some("media".to_string());
-                                        step.error = None;
-                                    }
+                                    Self::mark_last_decision_step_success(&mut decision_trace);
                                     return Ok(self
                                         .finalize_same_provider_retry_success(
                                             response,
@@ -1003,9 +1002,6 @@ impl RequestForwarder {
                                     log::warn!(
                                         "[{app_type_str}] [Media] Unsupported-image retry still failed: {retry_err}"
                                     );
-                                    if let Some(step) = decision_trace.last_mut() {
-                                        step.retry_kind = Some("media".to_string());
-                                    }
                                     if let Some(err) = self
                                         .handle_rectifier_retry_failure(
                                             retry_err,
@@ -1050,6 +1046,7 @@ impl RequestForwarder {
                                 "[{app_type_str}] [anyrouter] 上游拒绝 Responses 请求（invalid_responses_request），剥除 encrypted_content/tool_search 后重试: provider={}",
                                 provider.name
                             );
+                            Self::append_decision_step(&mut decision_trace, provider, key_id);
                             match self
                                 .forward(
                                     app_type,
@@ -1065,12 +1062,7 @@ impl RequestForwarder {
                             {
                                 Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!("[{app_type_str}] [anyrouter] Codex 兼容重试成功");
-                                    if let Some(step) = decision_trace.last_mut() {
-                                        step.outcome = "success".to_string();
-                                        step.status_code = Some(200);
-                                        step.retry_kind = Some("anyrouter_codex".to_string());
-                                        step.error = None;
-                                    }
+                                    Self::mark_last_decision_step_success(&mut decision_trace);
                                     return Ok(self
                                         .finalize_same_provider_retry_success(
                                             response,
@@ -1089,9 +1081,6 @@ impl RequestForwarder {
                                     log::warn!(
                                         "[{app_type_str}] [anyrouter] Codex 兼容重试仍失败: {retry_err}"
                                     );
-                                    if let Some(step) = decision_trace.last_mut() {
-                                        step.retry_kind = Some("anyrouter_codex".to_string());
-                                    }
                                     if let Some(err) = self
                                         .handle_rectifier_retry_failure(
                                             retry_err,
@@ -1173,6 +1162,7 @@ impl RequestForwarder {
                                 let _ = std::mem::replace(&mut rectifier_retried, true);
 
                                 // 使用同一供应商重试（不计入熔断器）
+                                Self::append_decision_step(&mut decision_trace, provider, key_id);
                                 match self
                                     .forward(
                                         app_type,
@@ -1188,12 +1178,7 @@ impl RequestForwarder {
                                 {
                                     Ok((response, claude_api_format, outbound_model)) => {
                                         log::info!("[{app_type_str}] [RECT-002] 整流重试成功");
-                                        if let Some(step) = decision_trace.last_mut() {
-                                            step.outcome = "success".to_string();
-                                            step.status_code = Some(200);
-                                            step.retry_kind = Some("rectifier".to_string());
-                                            step.error = None;
-                                        }
+                                        Self::mark_last_decision_step_success(&mut decision_trace);
                                         self.record_success_result(
                                             &provider.id,
                                             key_id,
@@ -1258,9 +1243,6 @@ impl RequestForwarder {
                                         log::warn!(
                                             "[{app_type_str}] [RECT-003] 整流重试仍失败: {retry_err}"
                                         );
-                                        if let Some(step) = decision_trace.last_mut() {
-                                            step.retry_kind = Some("rectifier".to_string());
-                                        }
                                         if let Some(err) = self
                                             .handle_rectifier_retry_failure(
                                                 retry_err,
@@ -1362,6 +1344,7 @@ impl RequestForwarder {
                             let _ = std::mem::replace(&mut budget_rectifier_retried, true);
 
                             // 使用同一供应商重试（不计入熔断器）
+                            Self::append_decision_step(&mut decision_trace, provider, key_id);
                             match self
                                 .forward(
                                     app_type,
@@ -1377,12 +1360,7 @@ impl RequestForwarder {
                             {
                                 Ok((response, claude_api_format, outbound_model)) => {
                                     log::info!("[{app_type_str}] [RECT-011] budget 整流重试成功");
-                                    if let Some(step) = decision_trace.last_mut() {
-                                        step.outcome = "success".to_string();
-                                        step.status_code = Some(200);
-                                        step.retry_kind = Some("rectifier_budget".to_string());
-                                        step.error = None;
-                                    }
+                                    Self::mark_last_decision_step_success(&mut decision_trace);
                                     self.record_success_result(
                                         &provider.id,
                                         key_id,
@@ -1441,9 +1419,6 @@ impl RequestForwarder {
                                     log::warn!(
                                         "[{app_type_str}] [RECT-012] budget 整流重试仍失败: {retry_err}"
                                     );
-                                    if let Some(step) = decision_trace.last_mut() {
-                                        step.retry_kind = Some("rectifier_budget".to_string());
-                                    }
                                     if let Some(err) = self
                                         .handle_rectifier_retry_failure(
                                             retry_err,
@@ -1538,6 +1513,30 @@ impl RequestForwarder {
                             last_error = Some(e);
                             last_provider = Some(provider.clone());
                             last_key_id = attempt.key_id.clone();
+                            if skip_failure_marking {
+                                match anyrouter_retry
+                                    .plan_next_rotation(
+                                        last_error.as_ref().expect("last_error just set"),
+                                        self.anyrouter_429_max_attempts,
+                                        app_type_str,
+                                        &provider.name,
+                                        key_id,
+                                    )
+                                    .await
+                                {
+                                    AnyrouterRetryPlan::Rotate => {
+                                        if !move_to_next_anyrouter_attempt(
+                                            &providers,
+                                            adapter.as_ref(),
+                                            &mut provider_index,
+                                        ) {
+                                            break 'attempts;
+                                        }
+                                    }
+                                    AnyrouterRetryPlan::Stop => break 'attempts,
+                                    AnyrouterRetryPlan::Disabled => {}
+                                }
+                            }
                             continue;
                         }
                         ErrorCategory::Retryable => {
@@ -1587,7 +1586,32 @@ impl RequestForwarder {
                             last_error = Some(e);
                             last_provider = Some(provider.clone());
                             last_key_id = attempt.key_id.clone();
-                            provider_blocked_by_failure.insert(provider.id.clone());
+                            if skip_failure_marking {
+                                match anyrouter_retry
+                                    .plan_next_rotation(
+                                        last_error.as_ref().expect("last_error just set"),
+                                        self.anyrouter_429_max_attempts,
+                                        app_type_str,
+                                        &provider.name,
+                                        key_id,
+                                    )
+                                    .await
+                                {
+                                    AnyrouterRetryPlan::Rotate => {
+                                        if !move_to_next_anyrouter_attempt(
+                                            &providers,
+                                            adapter.as_ref(),
+                                            &mut provider_index,
+                                        ) {
+                                            break 'attempts;
+                                        }
+                                    }
+                                    AnyrouterRetryPlan::Stop => break 'attempts,
+                                    AnyrouterRetryPlan::Disabled => {}
+                                }
+                            } else {
+                                provider_blocked_by_failure.insert(provider.id.clone());
+                            }
                             // 继续尝试下一个供应商
                             continue;
                         }
@@ -2376,7 +2400,9 @@ impl RequestForwarder {
 /// 从 ProxyError 中提取错误消息
 fn extract_error_message(error: &ProxyError) -> Option<String> {
     match error {
-        ProxyError::UpstreamError { body, .. } => body.clone(),
+        ProxyError::UpstreamError {
+            body: Some(body), ..
+        } => Some(body.clone()),
         _ => Some(error.to_string()),
     }
 }
@@ -2402,10 +2428,7 @@ fn upstream_error_body(error: &ProxyError) -> Option<String> {
 /// 单 provider 一次成功的普通请求无决策可言（trace 为单元素 success），返回 None 不落库，
 /// 避免给每条普通请求都写一份冗余 trace。
 pub fn serialize_decision_trace(trace: &[DecisionStep]) -> Option<String> {
-    let worth_recording = trace.len() > 1
-        || trace
-            .iter()
-            .any(|s| s.outcome != "success" || s.retry_kind.is_some());
+    let worth_recording = trace.len() > 1 || trace.iter().any(|s| s.outcome != "success");
     if !worth_recording {
         return None;
     }
@@ -2865,12 +2888,12 @@ const ANYROUTER_KNOWN_HOSTS: &[&str] = &["anyrouter.top", "a-ocnfniawgw.cn-shang
 /// anyrouter 要求显式携带的 1M 上下文 beta flag（ccLoad 同款适配）。
 const ANYROUTER_CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
-/// anyrouter 429/500/503 的同通道重试预算（每个客户端请求共享，跨 key 计数）。
+/// anyrouter 429/500/503 的单请求总上游请求预算（跨 key/channel 计数）。
 ///
 /// anyrouter 的 429/500/503 来自分钟级滚动窗口 + 后端账号轮转，稍候重试大概率
 /// 落到可用后端，因此预算刻意不受 AppProxyConfig.max_retries 约束、给足量；
 /// 同时不计入 key/通道冷却与熔断健康度（见 forward_with_retry_inner）。
-const ANYROUTER_RATE_LIMIT_MAX_RETRIES: usize = 50;
+const ANYROUTER_RATE_LIMIT_MAX_ATTEMPTS: usize = 50;
 /// anyrouter 429 重试间隔：线性爬升（250ms、500ms、…）封顶 2.5s；
 /// 上游显式 Retry-After 优先，单次封顶 30s。
 const ANYROUTER_RATE_LIMIT_RETRY_BASE_MS: u64 = 250;
@@ -2882,7 +2905,7 @@ const ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS: u64 = 120_000;
 
 /// 上游“稍后重试”类错误（anyrouter 特判用）：429 限流 + 500/503（高负载临时错误）。
 /// anyrouter 后端分钟级轮转，这些大概率稍候即恢复，故都按瞬时可重试处理
-/// （同通道重试 + 不计入 key/通道冷却与熔断健康度）。
+/// （轮转重试 + 不计入 key/通道冷却与熔断健康度）。
 fn is_transient_upstream_error(error: &ProxyError) -> bool {
     matches!(
         error,
@@ -2891,6 +2914,44 @@ fn is_transient_upstream_error(error: &ProxyError) -> bool {
             ..
         }
     )
+}
+
+fn anyrouter_retry_wait_ms(error: &ProxyError, retry_count: u64) -> u64 {
+    match error {
+        ProxyError::UpstreamError {
+            retry_after: Some(retry_after_secs),
+            ..
+        } => retry_after_secs
+            .saturating_mul(1000)
+            .min(ANYROUTER_RATE_LIMIT_RETRY_AFTER_CAP_SECS * 1000),
+        _ => (ANYROUTER_RATE_LIMIT_RETRY_BASE_MS * retry_count)
+            .min(ANYROUTER_RATE_LIMIT_RETRY_MAX_MS),
+    }
+}
+
+fn move_to_next_anyrouter_attempt(
+    providers: &[ProviderAttempt],
+    adapter: &dyn ProviderAdapter,
+    provider_index: &mut usize,
+) -> bool {
+    if providers.is_empty() {
+        return false;
+    }
+
+    let start = *provider_index;
+    for offset in 0..providers.len() {
+        let index = (start + offset) % providers.len();
+        let provider = &providers[index].provider;
+        if is_anyrouter_channel(
+            &provider.name,
+            &adapter.extract_base_url(provider).unwrap_or_default(),
+        ) {
+            *provider_index = index;
+            return true;
+        }
+    }
+
+    false
 }
 
 fn is_anyrouter_channel(provider_name: &str, base_url: &str) -> bool {
@@ -3229,7 +3290,7 @@ mod tests {
         }
     }
 
-    fn step(outcome: &str, retry_kind: Option<&str>) -> DecisionStep {
+    fn step(outcome: &str) -> DecisionStep {
         DecisionStep {
             index: 1,
             provider_id: "p1".to_string(),
@@ -3238,37 +3299,31 @@ mod tests {
             outcome: outcome.to_string(),
             status_code: None,
             error: None,
-            retry_kind: retry_kind.map(ToString::to_string),
-            is_failover_switch: false,
         }
     }
 
     #[test]
     fn serialize_decision_trace_skips_trivial_single_success() {
         // 单 provider 一次成功、无重试：不值得落库，返回 None。
-        let trace = vec![step("success", None)];
+        let trace = vec![step("success")];
         assert!(serialize_decision_trace(&trace).is_none());
     }
 
     #[test]
     fn serialize_decision_trace_records_multi_attempt_and_failures() {
         // 多次尝试（故障转移）应落库。
-        let multi = vec![step("failed", None), step("success", None)];
+        let multi = vec![step("failed"), step("success")];
         assert!(serialize_decision_trace(&multi).is_some());
 
-        // 单次但发生过重试（retry_kind 有值）应落库。
-        let retried = vec![step("success", Some("anyrouter"))];
-        assert!(serialize_decision_trace(&retried).is_some());
-
         // 单次失败也应落库（用于错误详情）。
-        let failed = vec![step("failed", None)];
+        let failed = vec![step("failed")];
         let json = serialize_decision_trace(&failed).expect("failed step should record");
         assert!(json.contains("\"outcome\":\"failed\""), "got: {json}");
     }
 
     #[test]
     fn transient_upstream_error_matches_429_500_503() {
-        // anyrouter 同通道重试 + 不标记冷却的触发条件：429 限流 / 500、503 高负载临时错误。
+        // anyrouter 轮转重试 + 不标记冷却的触发条件：429 限流 / 500、503 高负载临时错误。
         assert!(is_transient_upstream_error(&upstream_error(
             429, None, None
         )));
@@ -3292,6 +3347,59 @@ mod tests {
         assert!(!is_transient_upstream_error(
             &ProxyError::NoAvailableProvider
         ));
+    }
+
+    #[test]
+    fn anyrouter_rotation_skips_non_anyrouter_attempts() {
+        let adapter = get_adapter(&AppType::Claude);
+        let anyrouter_1 = Provider::with_id(
+            "anyrouter-1".to_string(),
+            "anyrouter key 1".to_string(),
+            json!({ "base_url": "https://anyrouter.top" }),
+            None,
+        );
+        let normal = Provider::with_id(
+            "normal-1".to_string(),
+            "normal provider".to_string(),
+            json!({ "base_url": "https://example.com" }),
+            None,
+        );
+        let anyrouter_2 = Provider::with_id(
+            "anyrouter-2".to_string(),
+            "normal name".to_string(),
+            json!({ "base_url": "https://a-ocnfniawgw.cn-shanghai.fcapp.run" }),
+            None,
+        );
+        let providers = vec![
+            ProviderAttempt {
+                provider: anyrouter_1,
+                key_id: Some("key-1".to_string()),
+            },
+            ProviderAttempt {
+                provider: normal,
+                key_id: None,
+            },
+            ProviderAttempt {
+                provider: anyrouter_2,
+                key_id: Some("key-2".to_string()),
+            },
+        ];
+
+        let mut provider_index = 1;
+        assert!(move_to_next_anyrouter_attempt(
+            &providers,
+            adapter.as_ref(),
+            &mut provider_index
+        ));
+        assert_eq!(provider_index, 2);
+
+        provider_index = 3;
+        assert!(move_to_next_anyrouter_attempt(
+            &providers,
+            adapter.as_ref(),
+            &mut provider_index
+        ));
+        assert_eq!(provider_index, 0);
     }
 
     #[test]
@@ -3518,7 +3626,7 @@ mod tests {
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
-            anyrouter_429_max_retries: ANYROUTER_RATE_LIMIT_MAX_RETRIES,
+            anyrouter_429_max_attempts: ANYROUTER_RATE_LIMIT_MAX_ATTEMPTS,
             anyrouter_429_total_wait_ms: ANYROUTER_RATE_LIMIT_TOTAL_WAIT_MS,
         }
     }
@@ -3944,7 +4052,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anyrouter_429_retries_same_channel_beyond_max_attempts_setting() {
+    async fn anyrouter_429_total_budget_allows_retries_beyond_max_attempts_setting() {
         install_test_crypto_provider();
 
         let seen_auth = Arc::new(Mutex::new(Vec::new()));
@@ -3979,7 +4087,7 @@ mod tests {
         let mut forwarder =
             test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
         // max_retries=0 语义（仅尝试一家、无故障转移）：anyrouter 的 429
-        // 原地重试预算独立于该设置，两次 429 后第三次仍应成功。
+        // 总请求预算独立于该设置；单通道场景下两次 429 后第三次仍应成功。
         forwarder.max_attempts = 1;
         forwarder.current_provider_id_at_start = "anyrouter-1".to_string();
         let attempts = forwarder.router.select_providers("claude").await.unwrap();
@@ -4001,12 +4109,130 @@ mod tests {
             .await
             .unwrap_or_else(|err| panic!("anyrouter 429 retry should succeed: {}", err.error));
 
+        assert_eq!(result.decision_trace.len(), 3);
+        assert_eq!(result.decision_trace[0].outcome, "failed");
+        assert_eq!(result.decision_trace[0].status_code, Some(429));
+        assert!(result.decision_trace[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("rate limit")));
+        assert_eq!(result.decision_trace[1].outcome, "failed");
+        assert_eq!(result.decision_trace[1].status_code, Some(429));
+        assert!(result.decision_trace[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("rate limit")));
+        assert_eq!(result.decision_trace[2].outcome, "success");
+        assert!(result.decision_trace[2].error.is_none());
         assert_eq!(
             result.response.bytes().await.unwrap(),
             Bytes::from_static(b"{\"ok\":true}")
         );
         // 两次 429 + 一次成功，全部打在同一通道上
         assert_eq!(seen_auth.lock().await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn anyrouter_429_total_attempt_budget_rotates_across_keys() {
+        install_test_crypto_provider();
+
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v1/messages", post(always_rate_limited_mock_handler))
+            .with_state(seen_auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock upstream server");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let provider = Provider::with_id(
+            "anyrouter-1".to_string(),
+            "anyrouter 免费池".to_string(),
+            json!({
+                "base_url": base_url,
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "sk-key-1"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider).unwrap();
+        db.set_current_provider("claude", "anyrouter-1").unwrap();
+
+        db.add_provider_key(
+            "claude",
+            "anyrouter-1",
+            &crate::provider::ProviderKeyInput {
+                name: "key-1".to_string(),
+                key_value: "sk-key-1".to_string(),
+                auth_field: Some("env.ANTHROPIC_AUTH_TOKEN".to_string()),
+                enabled: true,
+                priority: 10,
+                weight: 1,
+                usage_script: None,
+            },
+        )
+        .unwrap();
+        db.add_provider_key(
+            "claude",
+            "anyrouter-1",
+            &crate::provider::ProviderKeyInput {
+                name: "key-2".to_string(),
+                key_value: "sk-key-2".to_string(),
+                auth_field: Some("env.ANTHROPIC_AUTH_TOKEN".to_string()),
+                enabled: true,
+                priority: 20,
+                weight: 1,
+                usage_script: None,
+            },
+        )
+        .unwrap();
+
+        let mut forwarder =
+            test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
+        forwarder.max_attempts = 1;
+        forwarder.anyrouter_429_max_attempts = 4;
+        forwarder.current_provider_id_at_start = "anyrouter-1".to_string();
+        let attempts = forwarder.router.select_providers("claude").await.unwrap();
+
+        let err = forwarder
+            .forward_with_retry(
+                &AppType::Claude,
+                http::Method::POST,
+                "/v1/messages",
+                json!({
+                    "model": "claude-3-5-sonnet-latest",
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                HeaderMap::new(),
+                Extensions::new(),
+                attempts,
+            )
+            .await
+            .err()
+            .expect("all anyrouter attempts should fail");
+
+        assert!(matches!(
+            err.error,
+            ProxyError::UpstreamError { status: 429, .. }
+        ));
+        assert_eq!(err.decision_trace.len(), 4);
+        assert_eq!(
+            *seen_auth.lock().await,
+            vec![
+                "Bearer sk-key-1".to_string(),
+                "Bearer sk-key-2".to_string(),
+                "Bearer sk-key-1".to_string(),
+                "Bearer sk-key-2".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4076,8 +4302,8 @@ mod tests {
         let mut forwarder =
             test_forwarder_with_db(db.clone(), Duration::from_secs(2), Duration::from_secs(2));
         forwarder.max_attempts = 2;
-        // 预算清零：跳过原地重试，直接验证"429 落入通用分类但不标记冷却"
-        forwarder.anyrouter_429_max_retries = 0;
+        // 预算清零：跳过额外轮转重试，直接验证"429 落入通用分类但不标记冷却"
+        forwarder.anyrouter_429_max_attempts = 0;
         forwarder.current_provider_id_at_start = "anyrouter-1".to_string();
         let attempts = forwarder.router.select_providers("claude").await.unwrap();
 
@@ -6090,6 +6316,15 @@ mod tests {
             Ok(result) => result,
             Err(err) => panic!("retry with stripped body should succeed: {}", err.error),
         };
+        assert_eq!(result.decision_trace.len(), 2);
+        assert_eq!(result.decision_trace[0].outcome, "failed");
+        assert_eq!(result.decision_trace[0].status_code, Some(400));
+        assert!(result.decision_trace[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("invalid_responses_request")));
+        assert_eq!(result.decision_trace[1].outcome, "success");
+        assert!(result.decision_trace[1].error.is_none());
         drop(result);
 
         let captured = captured.lock().await;
