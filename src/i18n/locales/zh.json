@@ -417,7 +417,9 @@
         "testTitle": "测试过滤",
         "testDescription": "输入示例文本，预览脱敏效果（使用当前未保存的开关设置）",
         "testRun": "运行测试",
-        "testHits": "命中 {{count}} 处"
+        "testHits": "命中 {{count}} 处",
+        "testTrustNote": "⚠️ 此处仅用于查看规则效果，请勿粘贴生产环境的真实密钥（开发模式下 IPC 调用可能被本机调试日志捕获）。",
+        "secretCoverageNote": "提示：兜底规则会跳过纯字母的长串以避免误判（如驼峰字段名）。裸的纯字母随机密钥建议以 `api_key=` 或 `Bearer ` 形式出现，以便被精准识别。"
       },
       "logConfig": {
         "title": "日志管理",

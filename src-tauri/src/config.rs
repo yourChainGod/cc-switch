@@ -208,7 +208,22 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
 /// - 通过 `NamedTempFile::persist` 替换目标：Unix 上是 rename(2)，
 ///   Windows 上使用 MOVEFILE_REPLACE_EXISTING 原子覆盖，消除旧实现
 ///   “先删后改名”两步之间目标文件彻底消失的窗口。
+///
+/// 行为：未指定 `mode` 时，若目标已存在则继承其权限位（保留用户手动
+/// 收紧过的配置文件权限）；目标不存在时沿用 `NamedTempFile` 的默认 0600。
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
+    atomic_write_mode(path, data, None)
+}
+
+/// 与 [`atomic_write`] 等价的原子写入，但允许在 Unix 下**于临时文件创建时**
+/// 就用 `O_CREAT` + `mode` 直接指定权限位（而不是事后 chmod），消除
+/// “rename 已生效但权限尚未收紧”的可被旁路读取的窗口。
+///
+/// - `mode = Some(0o600)`：临时文件一创建即为 owner-only，rename 后无需二次 chmod。
+/// - `mode = None`：行为与历史 [`atomic_write`] 一致——若目标已存在，继承其
+///   权限位；否则使用 `NamedTempFile` 的默认 0600。
+/// - Windows 忽略 `mode`（沿用系统默认 ACL）。
+pub fn atomic_write_mode(path: &Path, data: &[u8], mode: Option<u32>) -> Result<(), AppError> {
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
@@ -218,27 +233,70 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
         return Err(AppError::Config("无效的文件名".to_string()));
     }
 
+    // Unix 且指定了 mode 时：手撸 OpenOptions 走 O_CREAT|O_EXCL + mode，
+    // 让“临时文件创建瞬间”就是目标权限，rename 后零窗口。
+    // 其它情况（Windows，或未指定 mode）：复用 NamedTempFile，保留
+    // “rename 失败自动清理 tmp + Windows 上 MOVEFILE_REPLACE_EXISTING 原子覆盖”。
+    #[cfg(unix)]
+    if let Some(m) = mode {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let tmp = path.with_extension(format!(
+            "tmp.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+
+        let mut f = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(m)
+            .open(&tmp)
+            .map_err(|e| AppError::io(&tmp, e))?;
+        f.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
+        f.sync_all().map_err(|e| AppError::io(&tmp, e))?;
+        // 显式关闭以确保 rename 前所有 fd 状态稳定（Drop 也会关，但显式更清晰）
+        drop(f);
+
+        if let Err(e) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(AppError::IoContext {
+                context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
+                source: e,
+            });
+        }
+        return Ok(());
+    }
+
+    // 兼容路径：未指定 mode（或非 Unix）走原 NamedTempFile 实现
     let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| AppError::IoContext {
         context: format!("创建临时文件失败: {}", parent.display()),
         source: e,
     })?;
     tmp.write_all(data)
         .map_err(|e| AppError::io(tmp.path(), e))?;
-    // 落盘后再 rename，否则掉电时可能出现目标文件已替换但内容丢失
     tmp.as_file()
         .sync_all()
         .map_err(|e| AppError::io(tmp.path(), e))?;
 
     #[cfg(unix)]
     {
-        // 保留已有目标文件的权限（例如用户手动收紧过的配置文件）；
-        // 目标不存在时沿用 NamedTempFile 的默认 0600（配置可能含密钥，从紧处理）
+        // mode 为 None 时，若目标已存在则继承其权限（保留用户手动收紧过的配置）。
+        // 目标不存在时沿用 NamedTempFile 的默认 0600。
+        let _ = mode; // mode 已在上方 Some(_) 分支处理
         if let Ok(meta) = fs::metadata(path) {
             let _ = fs::set_permissions(tmp.path(), meta.permissions());
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+    }
 
-    // persist 失败时 PersistError 会带回临时文件，闭包结束即自动清理
     tmp.persist(path).map_err(|e| {
         let context = format!(
             "原子替换失败: {} -> {}",
@@ -435,6 +493,50 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o600, "existing permissions should be preserved");
         assert_eq!(fs::read(&target).expect("read back"), b"new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_mode_sets_0600_at_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.json");
+        atomic_write_mode(&path, b"{\"k\":1}", Some(0o600)).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "atomic_write_mode 应在 rename 后立即是 0600");
+        // 内容也要写对
+        assert_eq!(fs::read(&path).unwrap(), b"{\"k\":1}");
+        // 不应留下任何 .tmp.* 临时残留
+        let leftovers: Vec<String> = fs::read_dir(dir.path())
+            .expect("list dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "secret.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic_write_mode 不应残留临时文件: {leftovers:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_mode_0600_overwrites_existing_loose_target() {
+        // 覆盖一个原本 0644 的目标，最终应是 0600（来自创建时的 mode）。
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.json");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        atomic_write_mode(&path, b"new", Some(0o600)).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "Some(0o600) 必须覆盖已有的宽松权限，不应继承旧 0644"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"new");
     }
 
     #[test]

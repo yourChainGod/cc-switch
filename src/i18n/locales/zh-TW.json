@@ -383,7 +383,9 @@
         "testTitle": "測試過濾",
         "testDescription": "輸入範例文字，預覽脫敏效果（使用目前未儲存的開關設定）",
         "testRun": "執行測試",
-        "testHits": "命中 {{count}} 處"
+        "testHits": "命中 {{count}} 處",
+        "testTrustNote": "⚠️ 此處僅用於檢視規則效果，請勿貼上正式環境的真實密鑰（開發模式下 IPC 呼叫可能被本機除錯日誌擷取）。",
+        "secretCoverageNote": "提示：兜底規則會略過純字母的長字串以避免誤判（如駝峰式欄位名）。裸露的純字母隨機密鑰建議以 `api_key=` 或 `Bearer ` 形式出現，以便被精確識別。"
       },
       "logConfig": {
         "title": "日誌管理",

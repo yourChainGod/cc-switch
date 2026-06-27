@@ -417,7 +417,9 @@
         "testTitle": "Test filter",
         "testDescription": "Enter sample text to preview redaction (uses current unsaved toggles)",
         "testRun": "Run test",
-        "testHits": "{{count}} match(es)"
+        "testHits": "{{count}} match(es)",
+        "testTrustNote": "⚠️ This box is for previewing rule behavior only. Do not paste real production secrets — in dev mode the IPC payload may surface in local debug logs.",
+        "secretCoverageNote": "Note: the heuristic backstop skips long alphabetic-only strings to avoid false positives on camelCase identifiers. Bare alphabetic random secrets are best surfaced as `api_key=...` or `Bearer ...` for precise detection."
       },
       "logConfig": {
         "title": "Log Management",

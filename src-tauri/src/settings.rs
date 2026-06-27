@@ -568,17 +568,12 @@ fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
 
     // 原子写入：settings.json 是各 app 当前供应商指针、目录覆盖、WebDAV/S3 凭据
     // 与迁移标记的唯一载体，半写损坏会被 load_from_file 静默回退默认值。
-    // atomic_write 会负责创建父目录。
-    crate::config::atomic_write(&path, json.as_bytes())?;
-
-    // 文件包含明文密码，Unix 上收紧为 0600。
-    // atomic_write 走“临时文件 + rename”，权限必须设置在最终文件上。
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| AppError::io(&path, e))?;
-    }
+    // atomic_write_mode 会负责创建父目录。
+    //
+    // Unix 下使用 Some(0o600)：临时文件创建时（O_CREAT + mode）即为 owner-only，
+    // rename 后立刻是 0600，消除“rename 后 → 二次 chmod 之间”的 0644 权限窗口。
+    // 非 Unix 平台忽略 mode，沿用系统默认 ACL。
+    crate::config::atomic_write_mode(&path, json.as_bytes(), Some(0o600))?;
 
     Ok(())
 }

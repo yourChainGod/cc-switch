@@ -1343,6 +1343,44 @@ impl Database {
             return Ok(());
         }
 
+        // 归零会覆盖用户手动设定的 0/1 等值且不可恢复——先把原 priority 备份到
+        // provider_keys.meta_json.priority_before_v19，给用户留逃生通道。
+        // 该列在历史 schema 上不存在，幂等补齐；新表见 create_provider_keys_table。
+        Self::add_column_if_missing(conn, "provider_keys", "meta_json", "TEXT")?;
+
+        // 备份原 priority。条件子查询必须与下方归零 UPDATE 完全一致，否则会跑偏。
+        // CASE 防御非法 / NULL meta_json：要么走原值 json_set，要么从 '{}' 起步。
+        conn.execute(
+            "WITH dense_priority_groups AS (
+                SELECT app_type, provider_id
+                FROM provider_keys
+                GROUP BY app_type, provider_id
+                HAVING COUNT(*) >= 2
+                   AND COUNT(DISTINCT priority) = COUNT(*)
+                   AND MAX(priority) - MIN(priority) = COUNT(*) - 1
+            )
+            UPDATE provider_keys
+               SET meta_json = json_set(
+                       CASE WHEN meta_json IS NULL OR json_valid(meta_json) = 0
+                            THEN '{}'
+                            ELSE meta_json END,
+                       '$.priority_before_v19',
+                       priority
+                   )
+             WHERE EXISTS (
+                SELECT 1
+                  FROM dense_priority_groups g
+                 WHERE g.app_type = provider_keys.app_type
+                   AND g.provider_id = provider_keys.provider_id
+             )",
+            [],
+        )
+        .map_err(|e| {
+            AppError::Database(format!(
+                "备份 provider_keys 原 priority 到 meta_json 失败: {e}"
+            ))
+        })?;
+
         conn.execute(
             "WITH dense_priority_groups AS (
                 SELECT app_type, provider_id
@@ -1588,6 +1626,7 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 usage_script TEXT,
+                meta_json TEXT,
                 FOREIGN KEY (provider_id, app_type)
                     REFERENCES providers(id, app_type) ON DELETE CASCADE
             )",

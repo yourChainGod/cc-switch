@@ -108,6 +108,11 @@ export function PrivacyFilterSettings() {
             />
           </div>
         ))}
+        {config.enabled && config.secret && (
+          <p className="pl-4 text-xs text-muted-foreground">
+            {t("settings.advanced.privacy.secretCoverageNote")}
+          </p>
+        )}
       </div>
 
       {/* 测试过滤 */}
@@ -118,6 +123,9 @@ export function PrivacyFilterSettings() {
           </h3>
           <p className="text-xs text-muted-foreground">
             {t("settings.advanced.privacy.testDescription")}
+          </p>
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            {t("settings.advanced.privacy.testTrustNote")}
           </p>
         </div>
         <textarea

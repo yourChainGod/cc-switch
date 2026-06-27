@@ -8,7 +8,7 @@
 //! - Claude 的格式转换逻辑保留在此文件（用于 OpenRouter 旧接口回退）
 
 use super::{
-    error_mapper::{get_error_message, map_proxy_error_to_status},
+    error_mapper::{get_error_message, get_error_message_for_log, map_proxy_error_to_status},
     forwarder::ActiveConnectionGuard,
     handler_config::{
         claude_stream_usage_event_filter, codex_stream_usage_event_filter, CLAUDE_PARSER_CONFIG,
@@ -1845,10 +1845,14 @@ fn log_forward_error(
     let error = &err.error;
     let logger = UsageLogger::new(&state.db);
     let status_code = map_proxy_error_to_status(error);
-    let error_message = get_error_message(error);
     let request_id = uuid::Uuid::new_v4().to_string();
     let decision_trace = super::forwarder::serialize_decision_trace(&err.decision_trace);
-    let upstream_error_body = super::forwarder::forward_error_upstream_body(err);
+    // 错误体 / decision_trace 都会永久写入 SQLite（并可能进 S3/WebDAV 同步包），
+    // 落库前用当前请求的 PrivacyFilterConfig 走脱敏，避免上游错误回显把用户
+    // prompt 中的邮箱 / 密钥 / IP 等 PII 永久存住。
+    let privacy_cfg = state.db.get_privacy_filter_config().unwrap_or_default();
+    let error_message = get_error_message_for_log(error, &privacy_cfg);
+    let upstream_error_body = super::forwarder::forward_error_upstream_body(err, &privacy_cfg);
 
     if let Err(e) = logger.log_error_with_context(
         request_id,

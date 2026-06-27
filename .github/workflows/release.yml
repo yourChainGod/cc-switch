@@ -105,6 +105,12 @@ jobs:
         run: |
           set -eo pipefail
           TAG="${GITHUB_REF_NAME}"
+          # 深度防御：tag 必须匹配标准 semver + 可选 -fork-N 后缀，
+          # 防止异常 tag 名被注入到 gh api 调用与 bash 参数替换。
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-fork-[0-9]+)?$ ]]; then
+            echo "::error::tag '$TAG' 不符合白名单 vX.Y.Z[-fork-N]，拒绝 finalize"
+            exit 1
+          fi
           FULL="${TAG#v}"                 # 3.16.1-fork-4
           INTERNAL="$(node -p 'require("./package.json").version')"  # 3.16.104
           REPO="${GITHUB_REPOSITORY}"

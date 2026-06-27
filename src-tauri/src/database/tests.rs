@@ -389,9 +389,48 @@ fn schema_migration_v19_resets_generated_dense_key_priorities() {
             .expect("collect priorities")
     };
 
+    // 归零前的原 priority 应被备份到 meta_json.priority_before_v19；未命中归零规则的
+    // provider（manual：非连续整数）则 meta_json 留 NULL，不留垃圾备份。
+    let backups_for = |provider_id: &str| -> Vec<(i64, Option<i64>)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT priority, meta_json FROM provider_keys
+                 WHERE app_type = 'claude' AND provider_id = ?1
+                 ORDER BY id",
+            )
+            .expect("prepare backups");
+        stmt.query_map(params![provider_id], |row| {
+            let prio: i64 = row.get(0)?;
+            let meta_str: Option<String> = row.get(1)?;
+            let before = meta_str.and_then(|s| {
+                serde_json::from_str::<serde_json::Value>(&s)
+                    .ok()
+                    .and_then(|v| v.get("priority_before_v19").and_then(|x| x.as_i64()))
+            });
+            Ok((prio, before))
+        })
+        .expect("query backups")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect backups")
+    };
+
     assert_eq!(priorities_for("dense"), vec![0, 0, 0, 0]);
     assert_eq!(priorities_for("manual"), vec![10, 20, 30]);
     assert_eq!(priorities_for("two_key"), vec![0, 0]);
+
+    // dense：插入顺序 0,1,2,3 → 备份 0,1,2,3，priority 全 0
+    assert_eq!(
+        backups_for("dense"),
+        vec![(0, Some(0)), (0, Some(1)), (0, Some(2)), (0, Some(3)),]
+    );
+    // manual：10/20/30 非连续整数，不归零、不备份
+    assert_eq!(
+        backups_for("manual"),
+        vec![(10, None), (20, None), (30, None)]
+    );
+    // two_key：0,1 → 备份 0,1，priority 全 0
+    assert_eq!(backups_for("two_key"), vec![(0, Some(0)), (0, Some(1))]);
+
     assert_eq!(
         Database::get_user_version(&conn).expect("version after migration"),
         SCHEMA_VERSION

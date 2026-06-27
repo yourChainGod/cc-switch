@@ -585,6 +585,52 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
+            // 一次性清理三 app（claude_desktop / openclaw / hermes）孤儿 provider 行。
+            // fork 已从 UI 与后端删除这三个 app_type，老用户升级后数据库里仍可能残留对应
+            // provider 行，UI 不可见也不可清。用 <app_config_dir>/.purged_legacy_apps 标记
+            // 防重复执行；避免动 settings.rs 字段（有其它并发修复在动它）。
+            {
+                let marker_path = crate::config::get_app_config_dir()
+                    .join(".purged_legacy_apps");
+                if !marker_path.exists() {
+                    let mut purge_succeeded = false;
+                    match app_state.db.conn.lock() {
+                        Ok(conn) => {
+                            match conn.execute(
+                                "DELETE FROM providers WHERE app_type IN ('hermes','openclaw','claude_desktop')",
+                                [],
+                            ) {
+                                Ok(n) if n > 0 => {
+                                    purge_succeeded = true;
+                                    log::info!(
+                                        "✓ Pruned {n} legacy provider row(s) for removed app types"
+                                    );
+                                }
+                                Ok(_) => {
+                                    purge_succeeded = true;
+                                }
+                                Err(e) => log::warn!(
+                                    "✗ Failed to prune legacy provider rows: {e}"
+                                ),
+                            }
+                        }
+                        Err(e) => log::warn!(
+                            "✗ Failed to lock DB for legacy provider cleanup: {e}"
+                        ),
+                    }
+                    // 仅在 DELETE 成功后写标记；失败则下次启动重试。
+                    // 写标记失败不致命，仅多跑一次幂等 DELETE。
+                    if purge_succeeded {
+                        if let Err(e) = std::fs::write(&marker_path, b"") {
+                            log::warn!(
+                                "✗ Failed to write legacy purge marker {}: {e}",
+                                marker_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {

@@ -262,7 +262,7 @@ fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
 
-fn system_proxy_points_to_loopback() -> bool {
+pub(crate) fn system_proxy_points_to_loopback() -> bool {
     const KEYS: [&str; 6] = [
         "HTTP_PROXY",
         "http_proxy",

@@ -2,6 +2,12 @@
 //!
 //! - 读取 / 保存隐私过滤配置（存于 settings KV）
 //! - 测试：对给定文本按给定配置执行一次脱敏，供设置页「测试过滤」实时预览
+//!
+//! 安全约束（全文件适用）：
+//!   `test_privacy_filter` 接收明文 `text` 参数（可能含真实密钥）。本文件内
+//!   **禁止**对 `text` 做任何 `log::debug!` / `log::info!` / `println!` /
+//!   tracing 字段化输出（哪怕 debug 级别）—— 测试框可能粘贴真实密钥。
+//!   若未来需要诊断，仅记录 `text.len()` 与 `outcome.count`，不输出文本本身。
 
 use crate::proxy::types::PrivacyFilterConfig;
 
@@ -40,6 +46,12 @@ pub struct PrivacyFilterTestResult {
 }
 
 /// 用给定配置对一段文本做脱敏测试（不落库，直接返回结果）。
+///
+/// 安全约束：实现内**禁止**对 `text` 参数做任何 `log::debug!` /
+/// `println!` / tracing 字段化输出（哪怕 debug 级别）—— 测试框可能粘贴
+/// 真实密钥。若未来需要诊断，仅记录 `text.len()` 与 `outcome.count`，
+/// 不输出文本本身。当前函数体仅调用 `redact_text`，无任何日志输出，
+/// 符合该约束。
 #[tauri::command]
 pub async fn test_privacy_filter(
     config: PrivacyFilterConfig,

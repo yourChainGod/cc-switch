@@ -414,6 +414,8 @@ pub async fn set_model_routing_config(
         .db
         .set_model_routing_config(&config)
         .map_err(|e| e.to_string())?;
+    // 落盘成功后热更新编译缓存：请求路径直接拿 Arc 快照，避免每请求重复编译正则。
+    crate::proxy::model_routing::refresh_compiled_routing(&config);
     Ok(true)
 }
 
@@ -423,9 +425,12 @@ pub async fn test_model_routing(
     input: String,
     rules: Vec<crate::proxy::model_routing::ModelRoutingRule>,
 ) -> Result<ModelRoutingTestResult, String> {
-    use crate::proxy::model_routing::{resolve, MatchType};
+    use crate::proxy::model_routing::{
+        resolve_compiled, CompiledRoutingConfig, MatchType, ModelRoutingConfig,
+    };
 
-    // 逐条校验正则编译错误（仅 Regex 类型）
+    // 逐条校验正则编译错误（仅 Regex 类型），与编译缓存“坏规则即跳过”的行为
+    // 解耦——前端要按下标提示哪一条写错了，而编译缓存只会把坏规则剔除。
     let mut regex_errors = std::collections::HashMap::new();
     for (idx, rule) in rules.iter().enumerate() {
         if rule.match_type == MatchType::Regex && !rule.pattern.is_empty() {
@@ -435,18 +440,30 @@ pub async fn test_model_routing(
         }
     }
 
-    let hit = resolve(&rules, &input);
+    // 用临时 config 走编译路径求解：行为与请求期一致，避免运行期再次 Regex::new。
+    // 测试入口直接落在 codex 桶上，rules_for 任一桶逻辑相同。
+    let tmp_cfg = ModelRoutingConfig {
+        codex: rules.clone(),
+        ..Default::default()
+    };
+    let compiled = CompiledRoutingConfig::compile(&tmp_cfg);
+    let comp_rules = compiled.rules_for("codex").unwrap_or(&[]);
+    let hit = resolve_compiled(comp_rules, &input);
+
     Ok(match hit {
-        Some(hit) => ModelRoutingTestResult {
-            matched: true,
-            match_type: rules
-                .get(hit.rule_index)
-                .map(|r| r.match_type.as_str().to_string()),
-            pattern: rules.get(hit.rule_index).map(|r| r.pattern.clone()),
-            output: hit.target,
-            rule_index: Some(hit.rule_index),
-            regex_errors,
-        },
+        Some(hit) => {
+            let raw_idx = hit.rule_index;
+            ModelRoutingTestResult {
+                matched: true,
+                match_type: rules
+                    .get(raw_idx)
+                    .map(|r| r.match_type.as_str().to_string()),
+                pattern: rules.get(raw_idx).map(|r| r.pattern.clone()),
+                output: hit.target,
+                rule_index: Some(raw_idx),
+                regex_errors,
+            }
+        }
         None => ModelRoutingTestResult {
             matched: false,
             rule_index: None,

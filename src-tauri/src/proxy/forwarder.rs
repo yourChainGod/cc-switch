@@ -503,11 +503,15 @@ impl RequestForwarder {
         }
     }
 
-    fn mark_last_decision_step_failed(decision_trace: &mut [DecisionStep], error: &ProxyError) {
+    fn mark_last_decision_step_failed(
+        decision_trace: &mut [DecisionStep],
+        error: &ProxyError,
+        cfg: &PrivacyFilterConfig,
+    ) {
         if let Some(step) = decision_trace.last_mut() {
             step.outcome = "failed".to_string();
             step.status_code = upstream_status_code(error);
-            step.error = extract_error_message(error);
+            step.error = extract_error_message(error, cfg);
         }
     }
 
@@ -531,7 +535,11 @@ impl RequestForwarder {
         decision_trace: &mut Vec<DecisionStep>,
     ) -> Option<ForwardError> {
         // 标记当前 attempt 的决策步骤为失败（携带重试后的最终错误）。
-        Self::mark_last_decision_step_failed(decision_trace, &retry_err);
+        Self::mark_last_decision_step_failed(
+            decision_trace,
+            &retry_err,
+            &self.privacy_filter_config,
+        );
         // Provider 错误：本家上游/网络确实出问题，下一家 provider 可能可用 → 继续故障转移。
         // 客户端错误：整流后请求仍违法，下一家也修不好 → 直接返回。
         let is_provider_error = match &retry_err {
@@ -750,6 +758,10 @@ impl RequestForwarder {
         // 依次尝试每个供应商 / Key。预算按通道去重统计；
         // 有 key 池时，每个 key 与单独 Provider 一样占用一次尝试预算。
         // anyrouter 瞬时错误会进入轮转模式，允许在总请求上限内多轮遍历同一组通道。
+        //
+        // 循环依赖不变量：provider_router::apply_key_order 保证同 provider_id 的 attempts 连续排列，
+        // 同 provider 多 key 的“自动跳到下一把”通过顺序遍历自然达成（已删除 pending_key_retry_provider_id 机制）。
+        // 若修改 apply_key_order，必须保持该不变量或恢复 pending_key_retry。
         let mut provider_index = 0usize;
         'attempts: while provider_index < providers.len() {
             let attempt = &providers[provider_index];
@@ -928,7 +940,11 @@ impl RequestForwarder {
                 Err(e) => {
                     // 决策链：先把本次 attempt 标记为失败（带上游状态码/错误体）。
                     // 后续重试会追加新的 step，保留这次失败的真实错误。
-                    Self::mark_last_decision_step_failed(&mut decision_trace, &e);
+                    Self::mark_last_decision_step_failed(
+                        &mut decision_trace,
+                        &e,
+                        &self.privacy_filter_config,
+                    );
                     // anyrouter 429/500/503 在下面的通用 Retryable 分支处理：
                     // 不记冷却/熔断，并在总请求预算内轮转到下一条 provider/key。
 
@@ -1107,7 +1123,7 @@ impl RequestForwarder {
                     }
 
                     if is_anthropic_provider {
-                        let error_message = extract_error_message(&e);
+                        let error_message = extract_error_message(&e, &self.privacy_filter_config);
                         if should_rectify_thinking_signature(
                             error_message.as_deref(),
                             &self.rectifier_config,
@@ -1271,7 +1287,7 @@ impl RequestForwarder {
 
                     // 检测是否需要触发 budget 整流器（仅 Claude/ClaudeAuth 供应商）
                     if is_anthropic_provider {
-                        let error_message = extract_error_message(&e);
+                        let error_message = extract_error_message(&e, &self.privacy_filter_config);
                         if should_rectify_thinking_budget(
                             error_message.as_deref(),
                             &self.rectifier_config,
@@ -1759,16 +1775,30 @@ impl RequestForwarder {
         // 路由层模型映射（最终权威）：按客户端区分、对原始客户端模型求解，命中即用
         // 目标模型覆盖上面所有逻辑（catalog/env/pin）。未配置任何规则或未命中时不动，
         // 行为与现状完全一致。
+        //
+        // 性能：正则一次性在 `refresh_compiled_routing` 编译并存入全局快照，
+        // 请求路径只克隆 Arc + 顺序匹配（不再每请求 `Regex::new`）。
+        // 兜底：若全局缓存仍是 default（启动后尚未被 set 命令触发刷新）但本次
+        // 请求的 raw 配置非空，则 lazy 触发一次刷新——保证冷启动后第一个请求
+        // 之后即走快路径，且与"在加载入口主动调一次 refresh"语义等价。
         let mut routed_gemini_endpoint = None;
         let mut routed_outbound_model = None;
         if let Some(original) = original_request_model.as_deref() {
-            let rules = super::model_routing::rules_for(&self.model_routing, app_type.as_str());
-            if let Some(hit) = super::model_routing::resolve(rules, original) {
+            let app_key = app_type.as_str();
+            let mut snap = super::model_routing::compiled_routing();
+            if snap.is_empty() && !self.model_routing.is_empty() {
+                super::model_routing::refresh_compiled_routing(&self.model_routing);
+                snap = super::model_routing::compiled_routing();
+            }
+            let hit = snap
+                .rules_for(app_key)
+                .and_then(|rules| super::model_routing::resolve_compiled(rules, original));
+            if let Some(hit) = hit {
                 let target_model =
                     super::model_mapper::strip_one_m_suffix_for_upstream(&hit.target).to_string();
                 log::info!(
                     "[{}] [ModelRouting] {original} → {target_model} (rule #{})",
-                    app_type.as_str(),
+                    app_key,
                     hit.rule_index
                 );
                 if matches!(app_type, AppType::Gemini) {
@@ -2397,12 +2427,18 @@ impl RequestForwarder {
     }
 }
 
-/// 从 ProxyError 中提取错误消息
-fn extract_error_message(error: &ProxyError) -> Option<String> {
+/// 从 ProxyError 中提取错误消息（落库前按 `cfg` 做脱敏）。
+///
+/// `cfg` 来自请求所在 forwarder 持有的 `PrivacyFilterConfig`：
+/// - `enabled=false` → 旧行为：上游 body 或 `error.to_string()` 原样返回，
+///   保留诊断能力
+/// - `enabled=true`  → 按用户分类开关 mask 邮箱 / 密钥 / IP 等，避免敏感数据
+///   通过 `DecisionStep.error` 写入 `proxy_request_logs.decision_trace` 永久存储
+fn extract_error_message(error: &ProxyError, cfg: &PrivacyFilterConfig) -> Option<String> {
     match error {
         ProxyError::UpstreamError {
             body: Some(body), ..
-        } => Some(body.clone()),
+        } => Some(redact_for_log(body, cfg)),
         _ => Some(error.to_string()),
     }
 }
@@ -2415,12 +2451,27 @@ fn upstream_status_code(error: &ProxyError) -> Option<u16> {
     }
 }
 
-/// 从 ProxyError 提取上游返回的错误响应体原文（仅 UpstreamError 携带）。
-fn upstream_error_body(error: &ProxyError) -> Option<String> {
+/// 从 ProxyError 提取上游返回的错误响应体原文（仅 UpstreamError 携带），
+/// 写入 `proxy_request_logs.upstream_error_body` 前按 `cfg` 脱敏。
+fn upstream_error_body(error: &ProxyError, cfg: &PrivacyFilterConfig) -> Option<String> {
     match error {
-        ProxyError::UpstreamError { body, .. } => body.clone(),
+        ProxyError::UpstreamError {
+            body: Some(body), ..
+        } => Some(redact_for_log(body, cfg)),
         _ => None,
     }
+}
+
+/// 错误体写库 / 决策链落库前的脱敏。
+///
+/// - `cfg.enabled = false` 时直返原文（保留旧诊断能力）
+/// - `cfg.enabled = true`  时按用户分类开关做 `redact_text`，避免 PII / 密钥
+///   通过上游错误回显进入永久存储或 S3/WebDAV 同步包
+pub(crate) fn redact_for_log(body: &str, cfg: &PrivacyFilterConfig) -> String {
+    if !cfg.enabled {
+        return body.to_string();
+    }
+    crate::privacy_filter::redact_text(body, cfg).redacted
 }
 
 /// 把决策链序列化为 JSON 字符串，仅在「发生过多次尝试或有过失败」时返回 Some。
@@ -2435,9 +2486,13 @@ pub fn serialize_decision_trace(trace: &[DecisionStep]) -> Option<String> {
     serde_json::to_string(trace).ok()
 }
 
-/// 从 ForwardError 提取上游错误响应体（供失败落库存「真实上游返回」）。
-pub fn forward_error_upstream_body(err: &ForwardError) -> Option<String> {
-    upstream_error_body(&err.error)
+/// 从 ForwardError 提取上游错误响应体（供失败落库存「真实上游返回」），
+/// 落库前按 `cfg` 做 PII / 密钥脱敏。
+pub fn forward_error_upstream_body(
+    err: &ForwardError,
+    cfg: &PrivacyFilterConfig,
+) -> Option<String> {
+    upstream_error_body(&err.error, cfg)
 }
 
 /// 检测 Provider 是否为 Bedrock（通过 CLAUDE_CODE_USE_BEDROCK 环境变量判断）
@@ -3319,6 +3374,54 @@ mod tests {
         let failed = vec![step("failed")];
         let json = serialize_decision_trace(&failed).expect("failed step should record");
         assert!(json.contains("\"outcome\":\"failed\""), "got: {json}");
+    }
+
+    #[test]
+    fn upstream_error_body_redacts_when_filter_enabled() {
+        // 总开关开 + 默认分类全开：上游错误回显里的 PII / 密钥应在落库前 mask。
+        let err = upstream_error(
+            400,
+            Some(
+                "rejected prompt referencing contact@example.com and key sk-abcdefghijklmnopqrstuvwxyz",
+            ),
+            None,
+        );
+        let cfg = PrivacyFilterConfig {
+            enabled: true,
+            ..PrivacyFilterConfig::default()
+        };
+        let out = upstream_error_body(&err, &cfg).expect("upstream body present");
+        assert!(out.contains("[邮箱]"), "should redact email: {out}");
+        assert!(out.contains("[密钥]"), "should redact key: {out}");
+        assert!(
+            !out.contains("contact@example.com"),
+            "raw email leaked: {out}"
+        );
+    }
+
+    #[test]
+    fn upstream_error_body_passthrough_when_filter_disabled() {
+        // 默认 cfg：enabled = false → 不改动 body，保留旧诊断能力。
+        let body = "rejected prompt: contact@example.com".to_string();
+        let err = upstream_error(400, Some(&body), None);
+        let cfg = PrivacyFilterConfig::default();
+        let out = upstream_error_body(&err, &cfg).expect("upstream body present");
+        assert_eq!(out, body, "cfg disabled 时不应改动");
+    }
+
+    #[test]
+    fn extract_error_message_uses_filter_for_upstream_body() {
+        // decision_trace 走的 extract_error_message：上游 body 也要走 filter。
+        let err = upstream_error(500, Some("server error from 192.168.1.1"), None);
+        let cfg = PrivacyFilterConfig {
+            enabled: true,
+            ..PrivacyFilterConfig::default()
+        };
+        let msg = extract_error_message(&err, &cfg).expect("error message present");
+        assert!(
+            msg.contains("[IP]"),
+            "should redact IPv4 in error message: {msg}"
+        );
     }
 
     #[test]

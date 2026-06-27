@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,17 +28,22 @@ export function AutoFailoverConfigPanel({
     streamingIdleTimeout: "120",
     nonStreamingTimeout: "600",
   });
+  const lastSyncedConfigRef = useRef<typeof config | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
 
   useEffect(() => {
-    if (config) {
-      setFormData({
-        maxRetries: String(config.maxRetries),
-        streamingFirstByteTimeout: String(config.streamingFirstByteTimeout),
-        streamingIdleTimeout: String(config.streamingIdleTimeout),
-        nonStreamingTimeout: String(config.nonStreamingTimeout),
-      });
-    }
-  }, [config]);
+    if (!config) return;
+    // 用户已编辑且 config 是上次同步过的相同引用 → 不覆盖输入
+    if (isDirty && lastSyncedConfigRef.current === config) return;
+    setFormData({
+      maxRetries: String(config.maxRetries),
+      streamingFirstByteTimeout: String(config.streamingFirstByteTimeout),
+      streamingIdleTimeout: String(config.streamingIdleTimeout),
+      nonStreamingTimeout: String(config.nonStreamingTimeout),
+    });
+    lastSyncedConfigRef.current = config;
+    setIsDirty(false);
+  }, [config, isDirty]);
 
   const handleSave = async () => {
     if (!config) return;
@@ -125,6 +130,8 @@ export function AutoFailoverConfigPanel({
         circuitErrorRateThreshold: config.circuitErrorRateThreshold,
         circuitMinRequests: config.circuitMinRequests,
       });
+      setIsDirty(false);
+      lastSyncedConfigRef.current = config;
       toast.success(
         t("proxy.autoFailover.configSaved", "自动故障转移配置已保存"),
         { closeButton: true },
@@ -192,9 +199,10 @@ export function AutoFailoverConfigPanel({
               min="0"
               max="10"
               value={formData.maxRetries}
-              onChange={(e) =>
-                setFormData({ ...formData, maxRetries: e.target.value })
-              }
+              onChange={(e) => {
+                setFormData({ ...formData, maxRetries: e.target.value });
+                setIsDirty(true);
+              }}
               disabled={isDisabled}
             />
             <p className="text-xs text-muted-foreground">
@@ -218,12 +226,13 @@ export function AutoFailoverConfigPanel({
               min="1"
               max="120"
               value={formData.streamingFirstByteTimeout}
-              onChange={(e) =>
+              onChange={(e) => {
                 setFormData({
                   ...formData,
                   streamingFirstByteTimeout: e.target.value,
-                })
-              }
+                });
+                setIsDirty(true);
+              }}
               disabled={isDisabled}
             />
             <p className="text-xs text-muted-foreground">
@@ -244,12 +253,13 @@ export function AutoFailoverConfigPanel({
               min="0"
               max="600"
               value={formData.streamingIdleTimeout}
-              onChange={(e) =>
+              onChange={(e) => {
                 setFormData({
                   ...formData,
                   streamingIdleTimeout: e.target.value,
-                })
-              }
+                });
+                setIsDirty(true);
+              }}
               disabled={isDisabled}
             />
             <p className="text-xs text-muted-foreground">
@@ -270,12 +280,13 @@ export function AutoFailoverConfigPanel({
               min="60"
               max="1200"
               value={formData.nonStreamingTimeout}
-              onChange={(e) =>
+              onChange={(e) => {
                 setFormData({
                   ...formData,
                   nonStreamingTimeout: e.target.value,
-                })
-              }
+                });
+                setIsDirty(true);
+              }}
               disabled={isDisabled}
             />
             <p className="text-xs text-muted-foreground">

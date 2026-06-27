@@ -2,7 +2,7 @@
 //!
 //! 将 ProxyError 映射到合适的 HTTP 状态码，用于日志记录和手动构建错误响应
 
-use super::ProxyError;
+use super::{types::PrivacyFilterConfig, ProxyError};
 
 /// 将 ProxyError 映射到 HTTP 状态码
 ///
@@ -68,10 +68,24 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
 
 /// 将 ProxyError 转换为用户友好的错误消息
 pub fn get_error_message(error: &ProxyError) -> String {
+    get_error_message_with_body_filter(error, |body| body.to_string())
+}
+
+/// 将 ProxyError 转换为用户友好的错误消息，并在包含上游 body 时按隐私配置脱敏。
+///
+/// 该函数用于写入持久化日志；客户端响应路径仍使用 `get_error_message` 保持原行为。
+pub fn get_error_message_for_log(error: &ProxyError, cfg: &PrivacyFilterConfig) -> String {
+    get_error_message_with_body_filter(error, |body| super::forwarder::redact_for_log(body, cfg))
+}
+
+fn get_error_message_with_body_filter<F>(error: &ProxyError, filter_body: F) -> String
+where
+    F: Fn(&str) -> String,
+{
     match error {
         ProxyError::UpstreamError { status, body, .. } => {
             if let Some(body) = body {
-                format!("上游错误 ({status}): {body}")
+                format!("上游错误 ({status}): {}", filter_body(body))
             } else {
                 format!("上游错误 ({status})")
             }

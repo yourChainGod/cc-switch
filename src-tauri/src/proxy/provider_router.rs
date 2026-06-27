@@ -288,6 +288,30 @@ impl ProviderRouter {
                 key.id.clone(),
             )
         });
+
+        // forwarder 重试主循环（删除 pending_key_retry_provider_id 后）依赖：
+        // 同 provider_id 的 attempts 在列表中连续排列——同 provider 多 key 的“跳到下一把”
+        // 通过顺序遍历自然达成。本函数排序的 keys 切片源自 `expand_provider_attempts`，
+        // 只可能含同一个 provider_id 的 keys（DAO 按 provider_id 取），此处用连续断言
+        // 兜底，防止后续重构把跨 provider 的 keys 混进来而悄悄破坏不变量。
+        #[cfg(debug_assertions)]
+        {
+            let mut last_seen: std::collections::HashMap<&str, usize> =
+                std::collections::HashMap::new();
+            for (idx, key) in keys.iter().enumerate() {
+                if let Some(prev) = last_seen.get(key.provider_id.as_str()).copied() {
+                    debug_assert_eq!(
+                        idx,
+                        prev + 1,
+                        "provider {} 在 keys 中非连续排列：prev={} cur={}（forwarder 重试循环依赖此不变量）",
+                        key.provider_id,
+                        prev,
+                        idx
+                    );
+                }
+                last_seen.insert(key.provider_id.as_str(), idx);
+            }
+        }
     }
 
     fn key_random_tie_breaker(nonce: &[u8], key: &ProviderKey) -> [u8; 32] {
