@@ -174,7 +174,7 @@
     "title": "Пул ключей",
     "count": "{{count}} ключей",
     "description": "Первый доступный ключ записывается в конфигурацию прямого подключения; маршрутизируемые запросы используют тот же пул для аварийного переключения.",
-    "summary": "Ключи {{available}}/{{total}}",
+    "summary": "Ключи {{total}}/{{available}}/{{disabled}}",
     "summaryWithIssues": "Ключи {{total}} / {{issues}} с проблемами",
     "summaryTooltip": "Доступно ключей: {{available}}/{{total}}. Нестабильные: {{degraded}}, охлаждение: {{cooldown}}, отключённые: {{disabled}}. Высший приоритет: {{priority}}.",
     "resetCooldown": "Сбросить охлаждение",

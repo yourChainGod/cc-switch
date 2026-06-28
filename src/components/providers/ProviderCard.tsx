@@ -253,8 +253,10 @@ function ProviderCardImpl({
   const hasMultiplePlans =
     usage?.success && usage.data && usage.data.length > 1 && !isTokenPlan;
   const hasKeyPool = Boolean(keySummary && keySummary.total > 0);
+  // Only enabled keys in degraded/cooldown states count as issues. Disabled
+  // keys are reported separately in the total/available/disabled summary.
   const keyIssueCount = keySummary
-    ? keySummary.degraded + keySummary.cooldown + keySummary.disabled
+    ? keySummary.degraded + keySummary.cooldown
     : 0;
   const resetKeyCooldownLabel = t("providerKeys.resetCooldownTooltip", {
     defaultValue: "重置该供应商全部 Key 的冷却与失败计数，使其恢复可用",
@@ -499,17 +501,12 @@ function ProviderCardImpl({
                       "{{available}}/{{total}} available keys. Degraded: {{degraded}}, cooldown: {{cooldown}}, disabled: {{disabled}}. Best priority: {{priority}}.",
                   })}
                 >
-                  {keyIssueCount > 0
-                    ? t("providerKeys.summaryWithIssues", {
-                        total: keySummary.total,
-                        issues: keyIssueCount,
-                        defaultValue: "Key {{total}} / {{issues}} 异常",
-                      })
-                    : t("providerKeys.summary", {
-                        total: keySummary.total,
-                        available: keySummary.available,
-                        defaultValue: "Key {{available}}/{{total}}",
-                      })}
+                  {t("providerKeys.summary", {
+                    total: keySummary.total,
+                    available: keySummary.available,
+                    disabled: keySummary.disabled,
+                    defaultValue: "Key {{total}}/{{available}}/{{disabled}}",
+                  })}
                   {keyIssueCount > 0 && (
                     <button
                       type="button"

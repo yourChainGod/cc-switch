@@ -174,7 +174,7 @@
     "title": "Key Pool",
     "count": "{{count}} keys",
     "description": "The first available key is written to direct app config; routed requests use the same pool for failover.",
-    "summary": "Key {{available}}/{{total}}",
+    "summary": "Key {{total}}/{{available}}/{{disabled}}",
     "summaryWithIssues": "Key {{total}} / {{issues}} issues",
     "summaryTooltip": "{{available}}/{{total}} keys available. Degraded: {{degraded}}, cooldown: {{cooldown}}, disabled: {{disabled}}. Best priority: {{priority}}.",
     "resetCooldown": "Reset cooldown",

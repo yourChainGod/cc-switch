@@ -13,7 +13,9 @@ export interface KeyPoolEntryValue {
   total: number;
   /** 可用（已启用且状态正常）的 Key 数 */
   available: number;
-  /** 异常（停用/冷却/不稳定）的 Key 数 */
+  /** 未启用或已停用的 Key 数 */
+  disabled: number;
+  /** 异常（冷却/不稳定）的 Key 数；未启用不计入异常 */
   issues: number;
   /** 直连配置 Key 的跟随模式 */
   configKeyMode: "auto" | "manual";

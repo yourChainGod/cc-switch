@@ -449,6 +449,45 @@ impl Database {
         Ok(updated as u64)
     }
 
+    /// 禁用与指定 Key 相同 `key_value` 的全部 Key 池条目，跨应用和供应商生效。
+    ///
+    /// 403 通常说明该密钥本身不可用；同一个密钥可能被配置在多个 provider 下，
+    /// 因此先通过当前请求命中的 key_id 找到明文值，再禁用所有匹配项。
+    /// 这里不限制 app_type/provider_id，确保 Claude、Codex、Gemini 或同应用内
+    /// 多个供应商复用同一密钥时不会继续轮询到已经被拒绝的 key。
+    pub fn disable_provider_keys_matching_key_id(&self, key_id: &str) -> Result<u64, AppError> {
+        let now = now_ts();
+        let conn = lock_conn!(self.conn);
+        let key_value: Option<String> = conn
+            .query_row(
+                "SELECT key_value FROM provider_keys WHERE id = ?1",
+                params![key_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let Some(key_value) = key_value else {
+            return Ok(0);
+        };
+
+        let updated = conn
+            .execute(
+                "UPDATE provider_keys
+                 SET enabled = 0,
+                     status = 'disabled',
+                     last_failure_at = ?2,
+                     last_used_at = ?2,
+                     cooldown_until = NULL,
+                     updated_at = ?2
+                 WHERE key_value = ?1
+                   AND (enabled != 0 OR status != 'disabled')",
+                params![key_value, now],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(updated as u64)
+    }
+
     /// 该应用下最早一个冷却中 Key 距恢复还有多少秒（用于 503 响应的 Retry-After）。
     ///
     /// 只统计启用且未停用的 Key；没有任何 Key 在冷却时返回 None。

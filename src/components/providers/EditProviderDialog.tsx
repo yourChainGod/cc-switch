@@ -757,9 +757,27 @@ export function EditProviderDialog({
     }
   }, [activeProvider, appId, loadProviderKeys, refreshProviderKeySummaries, t]);
 
+  // Keep the editor summary aligned with provider cards:
+  // total / available / disabled is always shown, while the warning color is
+  // reserved for enabled keys that are degraded or in cooldown.
   const keyIssueCount = useMemo(
     () =>
-      providerKeys.filter((key) => !key.enabled || key.status !== "active")
+      providerKeys.filter(
+        (key) =>
+          key.enabled &&
+          (key.status === "degraded" || key.status === "cooldown"),
+      ).length,
+    [providerKeys],
+  );
+  const availableKeyCount = useMemo(
+    () =>
+      providerKeys.filter((key) => key.enabled && key.status === "active")
+        .length,
+    [providerKeys],
+  );
+  const disabledKeyCount = useMemo(
+    () =>
+      providerKeys.filter((key) => !key.enabled || key.status === "disabled")
         .length,
     [providerKeys],
   );
@@ -767,13 +785,21 @@ export function EditProviderDialog({
   const keyPoolEntry = useMemo<KeyPoolEntryValue>(
     () => ({
       total: providerKeys.length,
-      available: providerKeys.length - keyIssueCount,
+      available: availableKeyCount,
+      disabled: disabledKeyCount,
       issues: keyIssueCount,
       configKeyMode: effectiveConfigKeyMode,
       isLoading: isKeysLoading,
       open: () => setIsKeyPoolOpen(true),
     }),
-    [providerKeys.length, keyIssueCount, effectiveConfigKeyMode, isKeysLoading],
+    [
+      providerKeys.length,
+      availableKeyCount,
+      disabledKeyCount,
+      keyIssueCount,
+      effectiveConfigKeyMode,
+      isKeysLoading,
+    ],
   );
 
   const handleSaveKeyUsage = useCallback(

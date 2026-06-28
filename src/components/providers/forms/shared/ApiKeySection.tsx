@@ -107,17 +107,12 @@ export function ApiKeySection({
                       : "text-emerald-600 dark:text-emerald-400",
                   )}
                 >
-                  {keyPool.issues > 0
-                    ? t("providerKeys.summaryWithIssues", {
-                        total: keyPool.total,
-                        issues: keyPool.issues,
-                        defaultValue: "Key {{total}} / {{issues}} 异常",
-                      })
-                    : t("providerKeys.summary", {
-                        available: keyPool.available,
-                        total: keyPool.total,
-                        defaultValue: "Key {{available}}/{{total}}",
-                      })}
+                  {t("providerKeys.summary", {
+                    total: keyPool.total,
+                    available: keyPool.available,
+                    disabled: keyPool.disabled,
+                    defaultValue: "Key {{total}}/{{available}}/{{disabled}}",
+                  })}
                 </span>
                 <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium">
                   {t(`providerKeys.configMode.${keyPool.configKeyMode}`, {

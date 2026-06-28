@@ -171,7 +171,7 @@
     }
   },
   "providerKeys": {
-    "summary": "Key {{available}}/{{total}}",
+    "summary": "Key {{total}}/{{available}}/{{disabled}}",
     "summaryWithIssues": "Key {{total}} / {{issues}} 件の問題",
     "summaryTooltip": "{{available}}/{{total}} 個の Key が利用可能。不安定: {{degraded}}、クールダウン中: {{cooldown}}、無効: {{disabled}}。最優先度: {{priority}}。",
     "resetCooldown": "クールダウン解除",

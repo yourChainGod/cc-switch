@@ -171,7 +171,7 @@
     }
   },
   "providerKeys": {
-    "summary": "Key {{available}}/{{total}}",
+    "summary": "Key {{total}}/{{available}}/{{disabled}}",
     "summaryWithIssues": "Key {{total}} / {{issues}} 異常",
     "summaryTooltip": "{{available}}/{{total}} 個 Key 可用。不穩定：{{degraded}}，冷卻中：{{cooldown}}，已停用：{{disabled}}。最高優先級：{{priority}}。",
     "resetCooldown": "重置冷卻",
