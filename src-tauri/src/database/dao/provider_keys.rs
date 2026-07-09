@@ -507,8 +507,7 @@ impl Database {
     /// 仅标记 Degraded。
     ///
     /// `grace_failures` 为冷却宽限：已有连续失败数未达到该值时不进入冷却，
-    /// 只标 Degraded（留在轮转中，组内按失败数降序靠后）。瞬时限流（429）
-    /// 用它实现"多重试少冷却"。传 0 即原有行为。
+    /// 只标 Degraded（留在轮转中，组内按失败数降序靠后）。传 0 即原有行为。
     pub fn record_provider_key_failure(
         &self,
         app_type: &str,

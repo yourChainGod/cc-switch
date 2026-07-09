@@ -1134,6 +1134,9 @@ impl ProviderService {
         let keys = state
             .db
             .get_provider_keys(app_type.as_str(), provider.id.as_str())?;
+        let existing_binding = state
+            .db
+            .get_provider_config_key_binding(app_type.as_str(), provider.id.as_str())?;
         let existing = keys
             .iter()
             .find(|key| key.key_value.trim() == config_key.key_value);
@@ -1163,10 +1166,16 @@ impl ProviderService {
                         enabled: true,
                         priority,
                         weight,
-                        usage_script: None,
+                        usage_script: existing.usage_script.clone(),
                     },
                 )?;
-            } else if existing.auth_field.as_deref().is_none_or(str::is_empty) {
+            } else if existing
+                .auth_field
+                .as_deref()
+                .map(str::trim)
+                .filter(|field| !field.is_empty())
+                .is_none_or(|field| field != config_key.auth_field)
+            {
                 let _ = state.db.update_provider_key(
                     app_type.as_str(),
                     provider.id.as_str(),
@@ -1178,11 +1187,46 @@ impl ProviderService {
                         enabled: existing.enabled,
                         priority: existing.priority,
                         weight: existing.weight.max(1),
-                        usage_script: None,
+                        usage_script: existing.usage_script.clone(),
                     },
                 )?;
             }
             existing.id.clone()
+        } else if let Some(bound_key) = existing_binding
+            .as_ref()
+            .filter(|binding| binding.mode == CONFIG_KEY_MODE_MANUAL || keys.len() == 1)
+            .and_then(|binding| keys.iter().find(|key| key.id == binding.key_id))
+            // 用户手动禁用的 key 不做就地覆盖（否则会被悄悄重新启用）；
+            // 落到 else 分支按新值追加入池，旧凭证得以保留。
+            .filter(|key| key.enabled)
+        {
+            let name = if bound_key.name.trim().is_empty() {
+                "Config key".to_string()
+            } else {
+                bound_key.name.clone()
+            };
+            let _ = state.db.update_provider_key(
+                app_type.as_str(),
+                provider.id.as_str(),
+                bound_key.id.as_str(),
+                &ProviderKeyInput {
+                    name,
+                    key_value: config_key.key_value,
+                    auth_field: Some(config_key.auth_field),
+                    enabled: true,
+                    priority: bound_key.priority,
+                    weight: bound_key.weight.max(1),
+                    usage_script: bound_key.usage_script.clone(),
+                },
+            )?;
+            // 凭证已换新：清掉旧凭证遗留的冷却/失败计数，避免新 key 继承
+            // 旧 key 的认证冷却（最长 24h）而被调度排除。
+            let _ = state.db.reset_provider_key_health(
+                app_type.as_str(),
+                provider.id.as_str(),
+                bound_key.id.as_str(),
+            );
+            bound_key.id.clone()
         } else {
             let first_priority = keys
                 .iter()
@@ -1206,9 +1250,6 @@ impl ProviderService {
             key.id
         };
 
-        let existing_binding = state
-            .db
-            .get_provider_config_key_binding(app_type.as_str(), provider.id.as_str())?;
         if existing_binding
             .as_ref()
             .is_some_and(|binding| binding.key_id == config_key_id && !binding.mode.is_empty())

@@ -384,6 +384,15 @@
         "mediaHeuristic": "Heuristic Text-Only Model Detection",
         "mediaHeuristicDescription": "Predictively strips images before sending based on a built-in model-name list. When off, only the declared-text-only and upstream-error fallback paths remain, preventing the built-in list from misclassifying a multimodal model as text-only and silently dropping images"
       },
+      "codexContinue": {
+        "title": "Codex Continue",
+        "description": "Reasoning continuation for native Codex Responses",
+        "enabled": "Enable Codex Continue",
+        "enabledDescription": "Only applies to native Codex Responses streaming requests. Disabled by default.",
+        "step": "Truncation step",
+        "maxContinuations": "Max continuations",
+        "marker": "Continuation prompt"
+      },
       "optimizer": {
         "title": "Bedrock Request Optimizer",
         "description": "Automatically optimize Thinking and Cache configuration before sending requests (only applies to Bedrock providers)",

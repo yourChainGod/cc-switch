@@ -384,6 +384,15 @@
         "mediaHeuristic": "启发式纯文本模型识别",
         "mediaHeuristicDescription": "发送前按内置模型名列表预测性剥离图片。关闭后仅保留「已声明纯文本」与「上游报错兜底」两条事实驱动路径，避免内置列表把多模态模型误判为纯文本而静默丢图"
       },
+      "codexContinue": {
+        "title": "Codex Continue",
+        "description": "Codex 原生 Responses 推理续写",
+        "enabled": "启用 Codex Continue",
+        "enabledDescription": "仅对 Codex 原生 Responses 流式请求生效，默认关闭。",
+        "step": "截断步长",
+        "maxContinuations": "最大续写次数",
+        "marker": "续写提示"
+      },
       "optimizer": {
         "title": "Bedrock 请求优化器",
         "description": "在请求发送前自动优化 Thinking 和 Cache 配置（仅 Bedrock 供应商生效）",

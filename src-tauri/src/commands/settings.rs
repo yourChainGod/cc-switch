@@ -531,3 +531,27 @@ pub async fn set_log_config(
     );
     Ok(true)
 }
+
+/// 获取 Codex Continue 配置
+#[tauri::command]
+pub async fn get_codex_continue_config(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::proxy::codex_continue::CodexContinueConfig, String> {
+    state
+        .db
+        .get_codex_continue_config()
+        .map_err(|e| e.to_string())
+}
+
+/// 设置 Codex Continue 配置
+#[tauri::command]
+pub async fn set_codex_continue_config(
+    state: tauri::State<'_, crate::AppState>,
+    config: crate::proxy::codex_continue::CodexContinueConfig,
+) -> Result<bool, String> {
+    state
+        .db
+        .set_codex_continue_config(&config)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}

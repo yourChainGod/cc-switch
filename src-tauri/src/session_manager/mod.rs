@@ -90,14 +90,48 @@ pub fn load_messages(provider_id: &str, source_path: &str) -> Result<Vec<Session
         return opencode::load_messages_sqlite(source_path);
     }
 
-    let path = Path::new(source_path);
+    // Confine the source path to the provider's own session roots before
+    // opening it. This IPC command is reachable from the webview, so without
+    // containment any caller could read arbitrary process-readable files by
+    // passing a crafted source_path (the delete path already validates this way).
+    let roots = provider_roots(provider_id)?;
+    let path = validate_source_in_roots(source_path, &roots)?;
     match provider_id {
-        "codex" => codex::load_messages(path),
-        "claude" => claude::load_messages(path),
-        "opencode" => opencode::load_messages(path),
-        "gemini" => gemini::load_messages(path),
+        "codex" => codex::load_messages(&path),
+        "claude" => claude::load_messages(&path),
+        "opencode" => opencode::load_messages(&path),
+        "gemini" => gemini::load_messages(&path),
         _ => Err(format!("Unsupported provider: {provider_id}")),
     }
+}
+
+/// Canonicalize `source_path` and require it to live under one of `roots`.
+/// Shared by the load and delete paths so both enforce the same boundary.
+fn validate_source_in_roots(source_path: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
+    let validated_source = canonicalize_existing_path(Path::new(source_path), "session source")?;
+    let mut saw_existing_root = false;
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        saw_existing_root = true;
+        let validated_root = canonicalize_existing_path(root, "session root")?;
+        if validated_source.starts_with(&validated_root) {
+            return Ok(validated_source);
+        }
+    }
+    if !saw_existing_root {
+        return Err(format!(
+            "Session root not found: {}",
+            roots
+                .first()
+                .map(|root| root.display().to_string())
+                .unwrap_or_else(|| "<none>".to_string())
+        ));
+    }
+    Err(format!(
+        "Session source path is outside provider roots: {source_path}"
+    ))
 }
 
 pub fn delete_session(
@@ -132,13 +166,10 @@ fn delete_session_with_roots(
 ) -> Result<bool, String> {
     let validated_source = canonicalize_existing_path(source_path, "session source")?;
 
-    let mut saw_existing_root = false;
     for root in roots {
         if !root.exists() {
             continue;
         }
-
-        saw_existing_root = true;
         let validated_root = canonicalize_existing_path(root, "session root")?;
         if validated_source.starts_with(&validated_root) {
             return match provider_id {
@@ -153,7 +184,7 @@ fn delete_session_with_roots(
         }
     }
 
-    if !saw_existing_root {
+    if !roots.iter().any(|root| root.exists()) {
         return Err(format!(
             "Session root not found for provider {provider_id}: {}",
             roots

@@ -325,6 +325,31 @@ impl Database {
         self.set_setting("log_config", &json)
     }
 
+    // --- Codex Continue 配置 ---
+
+    /// 获取 Codex Continue 配置
+    ///
+    /// 不存在时返回默认值（默认关闭，不改变现有 Codex Responses 行为）。
+    pub fn get_codex_continue_config(
+        &self,
+    ) -> Result<crate::proxy::codex_continue::CodexContinueConfig, AppError> {
+        match self.get_setting("codex_continue_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析 Codex Continue 配置失败: {e}"))),
+            None => Ok(crate::proxy::codex_continue::CodexContinueConfig::default()),
+        }
+    }
+
+    /// 更新 Codex Continue 配置
+    pub fn set_codex_continue_config(
+        &self,
+        config: &crate::proxy::codex_continue::CodexContinueConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化 Codex Continue 配置失败: {e}")))?;
+        self.set_setting("codex_continue_config", &json)
+    }
+
     // --- 隐私过滤配置 ---
 
     /// 获取隐私过滤配置

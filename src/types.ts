@@ -217,6 +217,11 @@ export interface CustomHeaderRule {
   value: string;
 }
 
+// 本地代理请求覆盖：转换后深度合并到发往上游的请求体
+export interface LocalProxyRequestOverrides {
+  body?: Record<string, unknown>;
+}
+
 // 供应商元数据（字段名与后端一致，保持 snake_case）
 export interface ProviderMeta {
   // 自定义端点：以 URL 为键，值为端点信息
@@ -261,6 +266,8 @@ export interface ProviderMeta {
   codexChatReasoning?: CodexChatReasoning;
   // 自定义请求头规则（按序应用到发往上游的请求头）
   headerRules?: CustomHeaderRule[];
+  // 本地代理请求体覆盖（认证头仍走 headerRules，且受后端保护）
+  localProxyRequestOverrides?: LocalProxyRequestOverrides;
 }
 
 // Skill 同步方式
@@ -630,4 +637,3 @@ export interface OpenCodeMcpServerSpec {
   // 通用字段
   enabled?: boolean;
 }
-

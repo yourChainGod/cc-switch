@@ -589,17 +589,54 @@ pub async fn handle_responses(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
+    let providers = ctx.get_providers();
+    // 先过零成本请求形状门槛（stream + reasoning 对象 + store:false），再过
+    // provider 门槛，都命中才读 DB 配置——避免功能关闭/不适用时每请求付一次
+    // 锁下 SQLite 读 + env 查询。
+    let codex_continue_config = if super::codex_continue::request_shape_eligible(&body)
+        && !providers.iter().any(|attempt| {
+            super::providers::should_convert_codex_responses_to_chat(&attempt.provider, &endpoint)
+        }) {
+        let config = state
+            .db
+            .get_codex_continue_config()
+            .map(super::codex_continue::CodexContinueConfig::from_settings_with_env)
+            .unwrap_or_else(|e| {
+                log::warn!("[CodexContinue] 读取配置失败，使用 env/defaults: {e}");
+                super::codex_continue::CodexContinueConfig::from_env()
+            });
+        config.enabled.then_some(config)
+    } else {
+        None
+    };
+    let codex_continue_enabled = codex_continue_config.is_some();
+    // 仅在功能启用时为续写克隆首发 body/headers/extensions/providers
+    let continuation_context = if codex_continue_enabled {
+        let outbound_body = super::codex_continue::prepare_initial_payload(&body);
+        Some((
+            outbound_body.clone(),
+            headers.clone(),
+            extensions.clone(),
+            providers.clone(),
+        ))
+    } else {
+        None
+    };
+    let outbound_body = continuation_context
+        .as_ref()
+        .map(|(outbound_body, _, _, _)| outbound_body.clone())
+        .unwrap_or(body);
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
         .forward_with_retry(
             &AppType::Codex,
-            method,
+            method.clone(),
             &endpoint,
-            body,
+            outbound_body,
             headers,
             extensions,
-            ctx.get_providers(),
+            providers,
         )
         .await
     {
@@ -633,6 +670,28 @@ pub async fn handle_responses(
         .await;
     }
 
+    if let Some((config, (base_body, fold_headers, fold_extensions, fold_providers))) =
+        codex_continue_config
+            .zip(continuation_context)
+            .filter(|_| response.is_sse())
+    {
+        let response = super::codex_continue::build_folded_proxy_response(
+            super::codex_continue::FoldedProxyResponseArgs {
+                first_response: response,
+                first_connection_guard: connection_guard,
+                forwarder,
+                method,
+                endpoint: endpoint.clone(),
+                base_body,
+                headers: fold_headers,
+                extensions: fold_extensions,
+                providers: fold_providers,
+                config,
+            },
+        );
+        return build_codex_folded_stream_response(response, &ctx, &state);
+    }
+
     process_response(
         response,
         &ctx,
@@ -641,6 +700,131 @@ pub async fn handle_responses(
         connection_guard,
     )
     .await
+}
+
+fn build_codex_folded_stream_response(
+    response: super::hyper_client::ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+) -> Result<axum::response::Response, ProxyError> {
+    let status = response.status();
+    let mut response_headers = response.headers().clone();
+    strip_hop_by_hop_response_headers(&mut response_headers);
+
+    let mut builder = axum::response::Response::builder().status(status);
+    for (key, value) in response_headers.iter() {
+        builder = builder.header(key, value);
+    }
+
+    let usage_collector = create_codex_folded_usage_collector(ctx, state, status.as_u16());
+    let body = axum::body::Body::from_stream(create_logged_passthrough_stream(
+        response.bytes_stream(),
+        ctx.tag,
+        usage_collector,
+        ctx.streaming_timeout_config(),
+        None,
+    ));
+    builder.body(body).map_err(|e| {
+        log::error!("[Codex] 构建 folded Responses 流失败: {e}");
+        ProxyError::Internal(format!("Failed to build folded responses stream: {e}"))
+    })
+}
+
+fn create_codex_folded_usage_collector(
+    ctx: &RequestContext,
+    state: &ProxyState,
+    status_code: u16,
+) -> Option<SseUsageCollector> {
+    if !usage_logging_enabled(state) {
+        return None;
+    }
+
+    let state = state.clone();
+    let provider_id = ctx.provider.id.clone();
+    let provider_key_id = ctx.provider_key_id.clone();
+    let request_model = ctx.request_model.clone();
+    let fallback_model = ctx
+        .outbound_model
+        .clone()
+        .unwrap_or_else(|| ctx.request_model.clone());
+    let app_type_str = ctx.app_type_str;
+    let start_time = ctx.start_time;
+    let session_id = ctx.session_id.clone();
+    let decision_trace = ctx.decision_trace.clone();
+
+    Some(SseUsageCollector::new(
+        start_time,
+        Some(codex_stream_usage_event_filter),
+        move |events, first_token_ms| {
+            // 本地记账优先用真实计费值：折叠 terminal 的 usage 是去重后的
+            // public 口径（仅首轮 input），续写轮实际计费的 input 在
+            // metadata.ccswitch_codex_continue.proxy_billed_usage 里。
+            let billed_usage = events.iter().find_map(|event| {
+                let billed = event
+                    .get("response")?
+                    .get("metadata")?
+                    .get("ccswitch_codex_continue")?
+                    .get("proxy_billed_usage")?;
+                TokenUsage::from_codex_response_usage_value(billed)
+            });
+            // usage 缺失/全 0 时与普通流式路径一致：仍写一条零记录（保留延迟统计）
+            let usage = billed_usage
+                .or_else(|| TokenUsage::from_codex_stream_events_auto(&events))
+                .unwrap_or_default();
+
+            let model = usage
+                .model
+                .clone()
+                .filter(|m| !m.is_empty())
+                .or_else(|| {
+                    events.iter().find_map(|event| {
+                        if matches!(
+                            event.get("type").and_then(Value::as_str),
+                            Some("response.completed" | "response.incomplete" | "response.failed")
+                        ) {
+                            event
+                                .get("response")?
+                                .get("model")?
+                                .as_str()
+                                .filter(|m| !m.is_empty())
+                                .map(str::to_string)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_else(|| fallback_model.clone());
+
+            let latency_ms = start_time.elapsed().as_millis() as u64;
+            let state = state.clone();
+            let provider_id = provider_id.clone();
+            let provider_key_id = provider_key_id.clone();
+            let request_model = request_model.clone();
+            let outbound_model = fallback_model.clone();
+            let session_id = session_id.clone();
+            let decision_trace = decision_trace.clone();
+
+            tokio::spawn(async move {
+                log_usage(
+                    &state,
+                    &provider_id,
+                    provider_key_id,
+                    app_type_str,
+                    &model,
+                    &request_model,
+                    &outbound_model,
+                    usage,
+                    latency_ms,
+                    first_token_ms,
+                    true,
+                    status_code,
+                    Some(session_id),
+                    decision_trace,
+                )
+                .await;
+            });
+        },
+    ))
 }
 
 /// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）

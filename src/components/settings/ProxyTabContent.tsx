@@ -9,6 +9,7 @@ import {
   TrendingUp,
   Clock,
   Copy,
+  BrainCircuit,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -26,6 +27,7 @@ import { ModelMappingPanel } from "@/components/proxy/ModelMappingPanel";
 import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPanel";
 import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
+import { CodexContinueConfigPanel } from "@/components/settings/CodexContinueConfigPanel";
 import { PrivacyFilterSettings } from "@/components/settings/PrivacyFilterSettings";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -338,6 +340,29 @@ export function ProxyTabContent({
           </AccordionTrigger>
           <AccordionContent className="px-4 pb-4 pt-3 border-t border-border/50">
             <RectifierConfigPanel />
+          </AccordionContent>
+        </AccordionItem>
+
+        {/* Codex Continue */}
+        <AccordionItem
+          value="codexContinue"
+          className="rounded-xl glass-card overflow-hidden"
+        >
+          <AccordionTrigger className="px-4 py-3 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+            <div className="flex items-center gap-3">
+              <BrainCircuit className="h-5 w-5 text-blue-500" />
+              <div className="text-left">
+                <h3 className="text-sm font-semibold">
+                  {t("settings.advanced.codexContinue.title")}
+                </h3>
+                <p className="text-xs text-muted-foreground font-normal">
+                  {t("settings.advanced.codexContinue.description")}
+                </p>
+              </div>
+            </div>
+          </AccordionTrigger>
+          <AccordionContent className="px-4 pb-4 pt-3 border-t border-border/50">
+            <CodexContinueConfigPanel />
           </AccordionContent>
         </AccordionItem>
 

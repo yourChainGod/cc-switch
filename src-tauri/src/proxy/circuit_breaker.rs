@@ -337,13 +337,17 @@ impl CircuitBreaker {
     /// 用于整流器等场景：请求结果不应计入 Provider 健康度，
     /// 但仍需释放占用的探测名额，避免 HalfOpen 状态卡死
     pub fn release_half_open_permit(&self) {
-        let mut current = self.half_open_requests.load(Ordering::SeqCst);
+        Self::release_half_open_permit_inner(&self.half_open_requests);
+    }
+
+    fn release_half_open_permit_inner(half_open_requests: &AtomicU32) {
+        let mut current = half_open_requests.load(Ordering::SeqCst);
         loop {
             if current == 0 {
                 return;
             }
 
-            match self.half_open_requests.compare_exchange(
+            match half_open_requests.compare_exchange(
                 current,
                 current - 1,
                 Ordering::SeqCst,
@@ -353,6 +357,16 @@ impl CircuitBreaker {
                 Err(actual) => current = actual,
             }
         }
+    }
+
+    /// 返回 HalfOpen 探测名额的 RAII 守卫句柄。
+    ///
+    /// 调用方在发起探测请求前 `arm()`，请求正常走完记账路径后 `disarm()`；
+    /// 若守卫在被 disarm 之前 drop（例如客户端在 `forward()` await 期间断连、
+    /// future 被丢弃），Drop 会兜底归还名额，避免 `half_open_requests` 永久
+    /// 卡在上限、导致该通道再也无法完成恢复探测（须重启进程）。
+    pub(crate) fn half_open_permit_counter(&self) -> Arc<AtomicU32> {
+        self.half_open_requests.clone()
     }
 
     /// 转换到打开状态
@@ -396,6 +410,38 @@ pub struct CircuitBreakerStats {
     pub consecutive_successes: u32,
     pub total_requests: u32,
     pub failed_requests: u32,
+}
+
+/// RAII 守卫：持有一个 HalfOpen 探测名额，若在 `disarm()` 之前被 drop 则兜底归还。
+///
+/// 正常路径下 `forward()` 返回后调用 `disarm()`，把名额的归还交还给既有的
+/// `record_success_result` / `record_channel_result` / `release_channel_permit_neutral`
+/// 记账逻辑（保持状态机推进）。只有在 future 被中途丢弃（客户端断连）时，
+/// Drop 才会直接递减计数，防止名额永久泄漏、通道卡死。
+pub(crate) struct HalfOpenPermitGuard {
+    counter: Option<Arc<AtomicU32>>,
+}
+
+impl HalfOpenPermitGuard {
+    /// `used_half_open_permit` 为 false 时构造一个空守卫（无副作用）。
+    pub(crate) fn new(counter: Arc<AtomicU32>, used_half_open_permit: bool) -> Self {
+        Self {
+            counter: used_half_open_permit.then_some(counter),
+        }
+    }
+
+    /// 请求已走完正常记账路径，交出兜底归还的责任。
+    pub(crate) fn disarm(&mut self) {
+        self.counter = None;
+    }
+}
+
+impl Drop for HalfOpenPermitGuard {
+    fn drop(&mut self) {
+        if let Some(counter) = self.counter.take() {
+            CircuitBreaker::release_half_open_permit_inner(&counter);
+        }
+    }
 }
 
 #[cfg(test)]

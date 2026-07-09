@@ -746,6 +746,30 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                                     let mut remaining: Vec<u32> = open_indices.iter().copied().collect();
                                     remaining.sort_unstable();
                                     for index in remaining {
+                                        // A Read tool block whose function_call_arguments.done never
+                                        // matched this index (item_id/output_index dropped by a
+                                        // non-standard upstream on the .done event) has its arguments
+                                        // buffered in tool_args_by_index and would otherwise be lost —
+                                        // the .delta handler buffers Read args instead of streaming
+                                        // them. Flush them here so the tool call isn't silently emptied.
+                                        if tool_name_by_index.get(&index).map(String::as_str) == Some("Read") {
+                                            if let Some(raw) = tool_args_by_index.remove(&index) {
+                                                let sanitized = sanitize_anthropic_tool_use_input_json("Read", &raw);
+                                                if !sanitized.is_empty() {
+                                                    let event = json!({
+                                                        "type": "content_block_delta",
+                                                        "index": index,
+                                                        "delta": {
+                                                            "type": "input_json_delta",
+                                                            "partial_json": sanitized
+                                                        }
+                                                    });
+                                                    let sse = format!("event: content_block_delta\ndata: {}\n\n",
+                                                        serde_json::to_string(&event).unwrap_or_default());
+                                                    yield Ok(Bytes::from(sse));
+                                                }
+                                            }
+                                        }
                                         let stop_event = json!({
                                             "type": "content_block_stop",
                                             "index": index

@@ -71,6 +71,49 @@ fn get_backup_dir() -> Result<PathBuf, String> {
     Ok(home.join(".cc-switch").join("backups"))
 }
 
+/// Guard against IPC-supplied conflicts pointing at arbitrary files. A file-type
+/// conflict's `source_path` (format "path:line") may only reference one of the
+/// shell configuration files cc-switch itself scans; anything else is rejected
+/// so a crafted `delete_env_vars`/`restore_env_backup` call can't read or
+/// rewrite e.g. ~/.ssh/config or inject an `export` line into an arbitrary file.
+#[cfg(not(target_os = "windows"))]
+fn validated_conflict_file_path(source_path: &str) -> Result<String, String> {
+    let file_path = source_path
+        .split(':')
+        .next()
+        .filter(|p| !p.is_empty())
+        .ok_or("无效的文件路径格式")?;
+    if super::env_checker::allowed_shell_config_files()
+        .iter()
+        .any(|allowed| allowed == file_path)
+    {
+        Ok(file_path.to_string())
+    } else {
+        Err(format!("拒绝操作非白名单文件: {file_path}"))
+    }
+}
+
+/// Restrict a backup file path supplied over IPC to the app's own backups
+/// directory, rejecting traversal / absolute paths elsewhere.
+fn validated_backup_path(backup_path: &str) -> Result<PathBuf, String> {
+    if backup_path.contains("..") {
+        return Err("备份路径包含非法字符".to_string());
+    }
+    let backup_dir = get_backup_dir()?;
+    let canonical_dir = backup_dir
+        .canonicalize()
+        .map_err(|e| format!("无法解析备份目录: {e}"))?;
+    let candidate = PathBuf::from(backup_path);
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|e| format!("无法解析备份文件: {e}"))?;
+    if canonical.starts_with(&canonical_dir) {
+        Ok(canonical)
+    } else {
+        Err("备份路径超出允许的目录范围".to_string())
+    }
+}
+
 /// Delete a single environment variable
 #[cfg(target_os = "windows")]
 fn delete_single_env(conflict: &EnvConflict) -> Result<(), String> {
@@ -105,13 +148,8 @@ fn delete_single_env(conflict: &EnvConflict) -> Result<(), String> {
 fn delete_single_env(conflict: &EnvConflict) -> Result<(), String> {
     match conflict.source_type.as_str() {
         "file" => {
-            // Parse file path and line number from source_path (format: "path:line")
-            let parts: Vec<&str> = conflict.source_path.split(':').collect();
-            if parts.len() < 2 {
-                return Err("无效的文件路径格式".to_string());
-            }
-
-            let file_path = parts[0];
+            let file_path = validated_conflict_file_path(&conflict.source_path)?;
+            let file_path = file_path.as_str();
 
             // Read file content
             let content = fs::read_to_string(file_path)
@@ -151,7 +189,8 @@ fn delete_single_env(conflict: &EnvConflict) -> Result<(), String> {
 
 /// Restore environment variables from backup
 pub fn restore_from_backup(backup_path: String) -> Result<(), String> {
-    // Read backup file
+    // Read backup file (restricted to the app's own backups directory)
+    let backup_path = validated_backup_path(&backup_path)?;
     let content = fs::read_to_string(&backup_path).map_err(|e| format!("读取备份文件失败: {e}"))?;
 
     let backup_info: BackupInfo =
@@ -200,13 +239,8 @@ fn restore_single_env(conflict: &EnvConflict) -> Result<(), String> {
 fn restore_single_env(conflict: &EnvConflict) -> Result<(), String> {
     match conflict.source_type.as_str() {
         "file" => {
-            // Parse file path from source_path
-            let parts: Vec<&str> = conflict.source_path.split(':').collect();
-            if parts.is_empty() {
-                return Err("无效的文件路径格式".to_string());
-            }
-
-            let file_path = parts[0];
+            let file_path = validated_conflict_file_path(&conflict.source_path)?;
+            let file_path = file_path.as_str();
 
             // Read file content
             let mut content = fs::read_to_string(file_path)

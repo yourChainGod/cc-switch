@@ -2329,10 +2329,15 @@ impl ProxyService {
             (Some(auth), Some(cfg)) => {
                 let auth_path = get_codex_auth_path();
                 if auth.as_object().is_some_and(|obj| obj.is_empty()) {
-                    let _ = crate::config::delete_file(&auth_path);
+                    // Write config.toml FIRST; only remove auth.json once that
+                    // succeeds. Deleting auth.json before the config write meant
+                    // a failed write left the user with no auth at all (they'd
+                    // have to re-run `codex login`), destroying live OAuth
+                    // credentials that were never captured in any backup.
                     let config_path = get_codex_config_path();
                     crate::config::write_text_file(&config_path, cfg)
                         .map_err(|e| format!("写入 Codex config 失败: {e}"))?;
+                    let _ = crate::config::delete_file(&auth_path);
                 } else {
                     crate::codex_config::write_codex_live_atomic(auth, Some(cfg))
                         .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;

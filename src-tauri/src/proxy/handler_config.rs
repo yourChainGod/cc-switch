@@ -93,11 +93,14 @@ fn codex_auto_model_extractor(events: &[Value], fallback_model: &str) -> String 
             return model;
         }
     }
-    // 回退：从 response.completed 事件中提取
+    // 回退：从 Responses 终端事件中提取
     events
         .iter()
         .find_map(|e| {
-            if e.get("type")?.as_str()? == "response.completed" {
+            if matches!(
+                e.get("type").and_then(Value::as_str),
+                Some("response.completed" | "response.incomplete")
+            ) {
                 e.get("response")?
                     .get("model")?
                     .as_str()

@@ -352,6 +352,18 @@ impl ProviderRouter {
         breaker.allow_request().await
     }
 
+    /// 返回指定通道熔断器的 HalfOpen 名额计数句柄，用于构造 RAII 兜底守卫。
+    pub async fn half_open_permit_counter(
+        &self,
+        provider_id: &str,
+        key_id: Option<&str>,
+        app_type: &str,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicU32> {
+        let circuit_key = Self::channel_circuit_key(app_type, provider_id, key_id);
+        let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+        breaker.half_open_permit_counter()
+    }
+
     /// 记录供应商请求结果
     #[allow(dead_code)]
     pub async fn record_result(

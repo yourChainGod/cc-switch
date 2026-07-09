@@ -89,16 +89,17 @@ export function GlobalProxySettings() {
     [url, username, password],
   );
 
-  // 同步远程配置
+  // 同步远程配置。dirty 时跳过：后台 refetch（窗口重聚焦 / 定时刷新 / 其他
+  // 变更使同一 query key 失效）不应覆盖用户尚未保存的编辑（可能是正在修正的
+  // 凭证），否则会静默丢失输入。
   useEffect(() => {
-    if (savedUrl !== undefined) {
+    if (savedUrl !== undefined && !dirty) {
       const { baseUrl, username: u, password: p } = extractAuth(savedUrl || "");
       setUrl(baseUrl);
       setUsername(u);
       setPassword(p);
-      setDirty(false);
     }
-  }, [savedUrl]);
+  }, [savedUrl, dirty]);
 
   const handleSave = async () => {
     await setMutation.mutateAsync(fullUrl);

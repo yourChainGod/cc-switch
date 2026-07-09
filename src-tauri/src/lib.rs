@@ -1193,6 +1193,8 @@ pub fn run() {
             commands::set_optimizer_config,
             commands::get_log_config,
             commands::set_log_config,
+            commands::get_codex_continue_config,
+            commands::set_codex_continue_config,
             commands::get_privacy_filter_config,
             commands::set_privacy_filter_config,
             commands::test_privacy_filter,

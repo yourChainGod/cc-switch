@@ -862,8 +862,25 @@ impl RequestForwarder {
                 anyrouter_retry.record_request();
             }
 
+            // HalfOpen 探测名额的 RAII 兜底守卫：若客户端在下面的 forward().await
+            // 期间断连、future 被丢弃，Drop 会归还名额，避免通道恢复探测永久卡死
+            // （max_half_open_requests=1，泄漏后须重启进程）。forward() 正常返回后
+            // 立即 disarm，把名额归还交回既有的成功/失败/中性记账路径。
+            let mut half_open_guard = if used_half_open_permit {
+                let counter = self
+                    .router
+                    .half_open_permit_counter(&provider.id, key_id, app_type_str)
+                    .await;
+                super::circuit_breaker::HalfOpenPermitGuard::new(counter, true)
+            } else {
+                super::circuit_breaker::HalfOpenPermitGuard::new(
+                    std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                    false,
+                )
+            };
+
             // 转发请求（每个 Provider 只尝试一次，重试由客户端控制）
-            match self
+            let forward_result = self
                 .forward(
                     app_type,
                     &method,
@@ -874,8 +891,10 @@ impl RequestForwarder {
                     &extensions,
                     adapter.as_ref(),
                 )
-                .await
-            {
+                .await;
+            // forward() 已返回：后续记账路径接管名额归还，解除兜底守卫。
+            half_open_guard.disarm();
+            match forward_result {
                 Ok((response, claude_api_format, outbound_model)) => {
                     // 决策链：本次 attempt 成功，回填结局。
                     Self::mark_last_decision_step_success(&mut decision_trace);
@@ -1496,8 +1515,8 @@ impl RequestForwarder {
 
                     match category {
                         ErrorCategory::Retryable if key_id.is_some() => {
-                            // key 通道：任何可重试失败（401/429/5xx/超时）都只冷却该
-                            // key（指数退避），同 provider 的其他 key 继续参与调度，
+                            // key 通道：可重试失败只作用于当前 key；429 全局只降权不冷却，
+                            // 其他失败按 key_failure_cooldown 分轨冷却。同 provider 的其他 key 继续参与调度，
                             // 不连坐 provider（ccLoad 风格的渠道级隔离）。
                             self.router
                                 .release_channel_permit_neutral(
@@ -1948,6 +1967,17 @@ impl RequestForwarder {
         // 过滤私有参数（以 `_` 开头的字段），防止内部信息泄露到上游
         // 默认使用空白名单，过滤所有 _ 前缀字段
         let mut filtered_body = prepare_upstream_request_body(request_body);
+        // 本地代理请求体覆盖：转换/过滤后深度合并用户自定义 body（保护 top-level
+        // stream）。命中改动后重新过滤一次私有参数，防止覆盖体引入 `_` 前缀字段。
+        if let Some(overrides) = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+        {
+            if apply_local_proxy_body_overrides(&mut filtered_body, overrides) {
+                filtered_body = prepare_upstream_request_body(filtered_body);
+            }
+        }
         // 隐私过滤（进程内 PII/密钥 mask，best-effort，命中即就地脱敏，永不阻断请求）
         let redacted = self.apply_privacy_filter(&mut filtered_body);
         if redacted > 0 {
@@ -3143,15 +3173,13 @@ fn is_key_scoped_error(error: &ProxyError) -> bool {
 /// 任何可重试错误都只作用于当前 key 通道，不连坐同 provider 的其他 key。
 ///
 /// 优先级：
-/// 1. 429/5xx 且上游给了 Retry-After → 恰好冷却该秒数（上游最清楚自己何时恢复）
-/// 2. 配额/余额耗尽（含 429 配额型）→ 配额轨道，等待重置周期
-/// 3. 瞬时限流 429 → 前 3 次连续失败不冷却（限流多为分钟级窗口，应多重试；
-///    请求内本来就会切到下一个 key），之后才进入 30s 起步的短冷却
+/// 1. 429/5xx 且上游给了 Retry-After → 恰好冷却该秒数（上游最清楚自己何时恢复；
+///    这也保证"全部 key 冷却 → 503+Retry-After"背压路径在全池限流时可达）
+/// 2. 无 Retry-After 的 429 → 只降权，不进入 key 冷却（全局策略）
+/// 3. 配额/余额耗尽（非 429）→ 配额轨道，等待重置周期
 /// 4. 认证 / 5xx / 其他 → 维持原有分轨
 fn key_failure_cooldown(error: &ProxyError) -> (i64, i64, i64) {
     const MINUTE: i64 = 60;
-    /// 瞬时 429 的冷却宽限：连续失败满 3 次才开始冷却
-    const RATE_LIMIT_GRACE_FAILURES: i64 = 3;
 
     match error {
         // 认证失效：起步 10 分钟，指数爬升到 24 小时（坏 key 快速退出轮转，但可自愈）
@@ -3164,6 +3192,18 @@ fn key_failure_cooldown(error: &ProxyError) -> (i64, i64, i64) {
             body,
             retry_after,
         } => {
+            if *status == 429 {
+                // 上游显式 Retry-After：精确冷却该秒数（既尊重上游窗口，
+                // 也避免全池限流时每个请求横扫全部 key 轰炸上游）
+                if let Some(ra) = retry_after {
+                    let secs = (*ra as i64).clamp(1, 60 * MINUTE);
+                    return (secs, secs, 0);
+                }
+                // 无 Retry-After 的 429：只降权不冷却。DAO 会标 Degraded 并
+                // 累计失败；后续任意成功恢复 Active 并清零。
+                return (0, 0, 0);
+            }
+
             let quota_exhausted = body
                 .as_deref()
                 .map(|body| {
@@ -3175,9 +3215,9 @@ fn key_failure_cooldown(error: &ProxyError) -> (i64, i64, i64) {
                 })
                 .unwrap_or(false);
 
-            // 上游显式 Retry-After（仅限 429/5xx 这类"稍后重试"语义的状态码）：
+            // 上游显式 Retry-After（仅限 5xx 这类"稍后重试"语义的状态码）：
             // 冷却恰好该时长，不做指数放大；上限 1 小时防御异常值
-            if *status == 429 || *status >= 500 {
+            if *status >= 500 {
                 if let Some(ra) = retry_after {
                     let secs = (*ra as i64).clamp(1, 60 * MINUTE);
                     return (secs, secs, 0);
@@ -3185,12 +3225,8 @@ fn key_failure_cooldown(error: &ProxyError) -> (i64, i64, i64) {
             }
 
             if quota_exhausted {
-                // 配额/余额：等待重置周期（429 配额型也归入此轨，不再被短轨道截胡）
+                // 非 429 配额/余额：等待重置周期
                 (5 * MINUTE, 60 * MINUTE, 0)
-            } else if *status == 429 {
-                // 瞬时限流：多重试少冷却 —— 宽限期内只降权不下场，
-                // 连续超限后用 30s→10min 的短退避保护上游
-                (30, 10 * MINUTE, RATE_LIMIT_GRACE_FAILURES)
             } else if *status >= 500 {
                 // 上游 5xx：该 key 对应的上游通道故障
                 (2 * MINUTE, 30 * MINUTE, 0)
@@ -3263,6 +3299,73 @@ fn summarize_text_for_log(text: &str, max_chars: usize) -> String {
 
 fn prepare_upstream_request_body(request_body: Value) -> Value {
     canonicalize_value(filter_private_params_with_whitelist(request_body, &[]))
+}
+
+/// 应用本地代理请求体覆盖：把用户配置的自定义 body 深度合并进最终请求体。
+/// 返回 true 表示 body 发生了改变（调用方据此决定是否重新过滤私有参数）。
+fn apply_local_proxy_body_overrides(
+    body: &mut Value,
+    overrides: &crate::provider::LocalProxyRequestOverrides,
+) -> bool {
+    let Some(override_body) = overrides.body.as_ref() else {
+        return false;
+    };
+
+    if !override_body.is_object() {
+        log::warn!("[LocalProxyOverrides] Ignoring body override because it is not an object");
+        return false;
+    }
+
+    merge_json_override(body, override_body)
+}
+
+/// 深度合并 patch 进 target。对象递归合并；其它类型直接替换。
+/// top-level `stream` 字段受保护，不允许被覆盖（改流式语义会破坏转发链路）。
+fn merge_json_override(target: &mut Value, patch: &Value) -> bool {
+    merge_json_override_inner(target, patch, true)
+}
+
+fn merge_json_override_inner(target: &mut Value, patch: &Value, is_top_level: bool) -> bool {
+    match (target, patch) {
+        (Value::Object(target_map), Value::Object(patch_map)) => {
+            let mut changed = false;
+            for (key, patch_value) in patch_map {
+                if is_top_level && key == "stream" {
+                    log::warn!(
+                        "[LocalProxyOverrides] Ignoring body override for protected field: stream"
+                    );
+                    continue;
+                }
+                // override 的 model 会压过模型路由引擎的决策；允许但显式留痕，
+                // 否则 ModelRouting 日志与实际出站模型不一致时无从排查。
+                if is_top_level && key == "model" && target_map.get(key) != Some(patch_value) {
+                    log::info!(
+                        "[LocalProxyOverrides] body override rewrites model {:?} -> {}（覆盖模型路由结果）",
+                        target_map.get(key).and_then(Value::as_str),
+                        patch_value
+                    );
+                }
+                match target_map.get_mut(key) {
+                    Some(target_value) => {
+                        changed |= merge_json_override_inner(target_value, patch_value, false);
+                    }
+                    None => {
+                        target_map.insert(key.clone(), patch_value.clone());
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        }
+        (target_value, patch_value) => {
+            if target_value == patch_value {
+                false
+            } else {
+                *target_value = patch_value.clone();
+                true
+            }
+        }
+    }
 }
 
 fn log_prompt_cache_trace(
@@ -3562,16 +3665,16 @@ mod tests {
     fn cooldown_respects_upstream_retry_after_exactly() {
         // 429/5xx 带 Retry-After：恰好冷却该秒数（base=cap、无宽限）
         assert_eq!(
-            key_failure_cooldown(&upstream_error(429, None, Some(300))),
-            (300, 300, 0)
-        );
-        assert_eq!(
             key_failure_cooldown(&upstream_error(503, None, Some(45))),
             (45, 45, 0)
         );
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(429, None, Some(300))),
+            (300, 300, 0)
+        );
         // 异常大的值被钳到 1 小时
         assert_eq!(
-            key_failure_cooldown(&upstream_error(429, None, Some(86400))),
+            key_failure_cooldown(&upstream_error(503, None, Some(86400))),
             (3600, 3600, 0)
         );
         // 401/403 不吃 Retry-After，保持认证轨道
@@ -3582,33 +3685,53 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_routes_quota_429_to_quota_track() {
-        // 429 配额型：不再被瞬时限流的短轨道截胡
+    fn cooldown_keeps_all_429_out_of_key_cooldown() {
+        // 429 配额型也不进入 key cooldown；全局策略只降权。
         assert_eq!(
             key_failure_cooldown(&upstream_error(
                 429,
                 Some(r#"{"error":{"message":"You exceeded your monthly quota"}}"#),
                 None
             )),
-            (300, 3600, 0)
+            (0, 0, 0)
         );
-        // Retry-After 优先于配额关键词（上游显式时间最准）
+        // 上游显式 Retry-After 优先于全局降权策略（精确冷却该秒数）
         assert_eq!(
             key_failure_cooldown(&upstream_error(429, Some("quota exceeded"), Some(120))),
             (120, 120, 0)
         );
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(
+                429,
+                Some(
+                    r#"{"type":"error","error":{"message":"The request exceeds the rate limit on dimension: tpm. Please reduce the request frequency."}}"#
+                ),
+                None
+            )),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            key_failure_cooldown(&upstream_error(
+                429,
+                Some(
+                    r#"{"type":"error","error":{"type":"rate_limit_error","message":"rpm exhausted"}}"#
+                ),
+                None
+            )),
+            (0, 0, 0)
+        );
     }
 
     #[test]
-    fn cooldown_gives_transient_429_grace_before_short_backoff() {
-        // 瞬时限流：3 次宽限 + 30s→10min 短退避（多重试少冷却）
+    fn cooldown_keeps_generic_429_out_of_key_cooldown() {
+        // 未知 429 / 普通 rate limit 也不进入 cooldown。
         assert_eq!(
             key_failure_cooldown(&upstream_error(429, Some("rate limit exceeded"), None)),
-            (30, 600, 3)
+            (0, 0, 0)
         );
         assert_eq!(
             key_failure_cooldown(&upstream_error(429, None, None)),
-            (30, 600, 3)
+            (0, 0, 0)
         );
     }
 
@@ -3989,6 +4112,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_proxy_body_overrides_deep_merge_without_touching_stream() {
+        let mut body = json!({
+            "model": "before",
+            "stream": false,
+            "metadata": {
+                "keep": true,
+                "temperature": 1
+            },
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
+        let overrides = crate::provider::LocalProxyRequestOverrides {
+            body: Some(json!({
+                "model": "after",
+                "stream": true,
+                "metadata": {
+                    "temperature": 0.2,
+                    "top_p": 0.9
+                },
+                "messages": []
+            })),
+        };
+
+        assert!(apply_local_proxy_body_overrides(&mut body, &overrides));
+
+        assert_eq!(body["model"], "after");
+        // top-level stream 受保护，不被覆盖
+        assert_eq!(body["stream"], false);
+        // 对象深度合并：保留原字段，覆盖同名字段，追加新字段
+        assert_eq!(body["metadata"]["keep"], true);
+        assert_eq!(body["metadata"]["temperature"], 0.2);
+        assert_eq!(body["metadata"]["top_p"], 0.9);
+        // 非对象值（数组）整体替换
+        assert_eq!(body["messages"], json!([]));
+    }
+
+    #[test]
+    fn local_proxy_body_overrides_noop_when_body_absent_or_not_object() {
+        let mut body = json!({ "model": "x" });
+        let none_override = crate::provider::LocalProxyRequestOverrides { body: None };
+        assert!(!apply_local_proxy_body_overrides(&mut body, &none_override));
+        assert_eq!(body, json!({ "model": "x" }));
+
+        let non_object = crate::provider::LocalProxyRequestOverrides {
+            body: Some(json!("not-an-object")),
+        };
+        assert!(!apply_local_proxy_body_overrides(&mut body, &non_object));
+        assert_eq!(body, json!({ "model": "x" }));
+    }
+
+    #[test]
+    fn local_proxy_body_override_private_params_are_filtered_on_reprepare() {
+        // 覆盖体引入 `_` 前缀私有字段时，调用方会重新过滤——此处验证过滤链路。
+        let mut body = prepare_upstream_request_body(json!({ "model": "x" }));
+        let overrides = crate::provider::LocalProxyRequestOverrides {
+            body: Some(json!({ "_leak": "secret", "temperature": 0.5 })),
+        };
+        assert!(apply_local_proxy_body_overrides(&mut body, &overrides));
+        let reprepared = prepare_upstream_request_body(body);
+        assert!(reprepared.get("_leak").is_none());
+        assert_eq!(reprepared["temperature"], 0.5);
+    }
+
     #[tokio::test]
     async fn non_streaming_success_is_buffered_before_marking_provider_successful() {
         let forwarder = test_forwarder(Duration::from_secs(1), Duration::from_secs(1));
@@ -4130,8 +4316,8 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // 瞬时 429 在宽限期内：只标 Degraded、不冷却，key 仍留在轮转中
-        // （"429 多重试少冷却"——请求内已切到 key-2，下一请求亲和也偏向 key-2）
+        // 429 全局只标 Degraded、不冷却，key 仍留在轮转中；
+        // 请求内已切到 key-2，下一请求亲和也偏向 key-2。
         assert_eq!(
             key_1_after.status,
             crate::provider::ProviderKeyStatus::Degraded

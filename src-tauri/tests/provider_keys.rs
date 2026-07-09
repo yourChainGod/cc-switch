@@ -1158,6 +1158,100 @@ fn provider_update_reuses_existing_key_pool_value_as_config_key() {
 }
 
 #[test]
+fn provider_update_updates_bound_single_config_key_without_duplicating() {
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let state = AppState::new(db.clone());
+    let app_type = AppType::Claude;
+
+    let provider = Provider {
+        id: "provider-a".to_string(),
+        name: "Provider A".to_string(),
+        settings_config: json!({"env": {"ANTHROPIC_API_KEY": "legacy-key"}}),
+        website_url: None,
+        category: Some("third_party".to_string()),
+        created_at: Some(1),
+        sort_index: Some(1),
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider(app_type.as_str(), &provider)
+        .expect("save provider fixture");
+
+    let key = ProviderService::add_key(
+        &state,
+        app_type.clone(),
+        "provider-a",
+        &ProviderKeyInput {
+            name: "only key".to_string(),
+            key_value: "sk-original".to_string(),
+            auth_field: Some("ANTHROPIC_API_KEY".to_string()),
+            enabled: true,
+            priority: 10,
+            weight: 1,
+            usage_script: None,
+        },
+    )
+    .expect("add provider key");
+
+    let mut edited = db
+        .get_provider_by_id("provider-a", app_type.as_str())
+        .expect("read provider")
+        .expect("provider exists");
+    edited.name = "Provider A edited".to_string();
+    edited.settings_config = json!({"env": {"ANTHROPIC_API_KEY": "sk-edited"}});
+
+    ProviderService::update(&state, app_type.clone(), Some("provider-a"), edited)
+        .expect("update provider");
+
+    let keys = db
+        .get_provider_keys(app_type.as_str(), "provider-a")
+        .expect("read provider keys");
+    assert_eq!(keys.len(), 1, "bound config key should not be duplicated");
+    assert_eq!(keys[0].id, key.id);
+    assert_eq!(keys[0].name, "only key");
+    assert_eq!(keys[0].key_value, "sk-edited");
+    assert_eq!(keys[0].auth_field.as_deref(), Some("ANTHROPIC_API_KEY"));
+    assert!(keys[0].enabled);
+
+    let binding = db
+        .get_provider_config_key_binding(app_type.as_str(), "provider-a")
+        .expect("read config key binding")
+        .expect("binding exists");
+    assert_eq!(binding.key_id, key.id);
+    assert_eq!(binding.mode, "auto");
+
+    let stored = db
+        .get_provider_by_id("provider-a", app_type.as_str())
+        .expect("read stored provider")
+        .expect("provider exists");
+    assert_eq!(stored.name, "Provider A edited");
+    assert_eq!(
+        stored
+            .settings_config
+            .pointer("/env/ANTHROPIC_API_KEY")
+            .and_then(|value| value.as_str()),
+        Some("sk-edited")
+    );
+    assert_eq!(
+        stored
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.config_key_id.as_deref()),
+        Some(key.id.as_str())
+    );
+    assert_eq!(
+        stored
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.config_key_mode.as_deref()),
+        Some("auto")
+    );
+}
+
+#[test]
 fn codex_update_imports_experimental_bearer_token_into_key_pool() {
     let db = Arc::new(Database::memory().expect("create memory database"));
     let state = AppState::new(db.clone());
@@ -1416,10 +1510,10 @@ fn working_channel_affinity_upsert_get_and_delete_matching_channel() {
         .is_none());
 }
 
-/// 429 宽限重试：连续失败未达宽限次数前只标 Degraded（留在轮转中），
+/// 宽限退避：连续失败未达宽限次数前只标 Degraded（留在轮转中），
 /// 达到后才进入冷却，且指数从 (失败数 - 宽限) 起算；成功一次全部清零。
 #[test]
-fn rate_limit_grace_keeps_key_in_rotation_before_cooldown() {
+fn failure_grace_keeps_key_in_rotation_before_cooldown() {
     let db = Database::memory().expect("create memory database");
     let app_type = AppType::Claude.as_str();
 
@@ -1457,7 +1551,7 @@ fn rate_limit_grace_keeps_key_in_rotation_before_cooldown() {
         .expect("insert key");
 
     let grace = 3i64;
-    // 前 3 次连续 429：不冷却，仍可被调度
+    // 前 3 次连续失败：不冷却，仍可被调度
     for round in 1..=grace {
         assert!(db
             .record_provider_key_failure(app_type, "provider-a", &key.id, 30, 600, grace)

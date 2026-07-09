@@ -781,6 +781,24 @@ pub struct CustomHeaderRule {
     pub value: String,
 }
 
+/// 本地代理请求覆盖：在路由/协议转换之后、发往上游之前，把用户配置的
+/// 自定义请求体深度合并进最终请求体。header 覆盖由更强的 `header_rules`
+/// 承担（override/append/remove + 认证头保护），此处仅保留 body。
+///
+/// 结构保留上游 `localProxyRequestOverrides` 的 JSON 形状（含未使用的
+/// `headers` 键会被 serde 安全忽略），便于跨仓同步与前端复用。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalProxyRequestOverrides {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<serde_json::Value>,
+}
+
+impl LocalProxyRequestOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.body.is_none()
+    }
+}
+
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
@@ -857,6 +875,12 @@ pub struct ProviderMeta {
     /// 自定义请求头规则（按序应用；认证头受黑名单保护，见 forwarder）
     #[serde(default, rename = "headerRules", skip_serializing_if = "Vec::is_empty")]
     pub header_rules: Vec<CustomHeaderRule>,
+    /// 本地代理请求体覆盖：转换后深度合并进最终上游请求体（保护 top-level stream）。
+    #[serde(
+        rename = "localProxyRequestOverrides",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub local_proxy_request_overrides: Option<LocalProxyRequestOverrides>,
 }
 
 impl ProviderManager {
@@ -1255,8 +1279,8 @@ pub struct OpenCodeModelLimit {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeModelConfig, CodexModelConfig, GeminiModelConfig, OpenCodeProviderConfig, Provider,
-        ProviderManager, ProviderMeta, UniversalProvider,
+        ClaudeModelConfig, CodexModelConfig, GeminiModelConfig, LocalProxyRequestOverrides,
+        OpenCodeProviderConfig, Provider, ProviderManager, ProviderMeta, UniversalProvider,
     };
     use serde_json::json;
 
@@ -1284,6 +1308,49 @@ mod tests {
         let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
 
         assert!(value.get("pricingModelSource").is_none());
+    }
+
+    #[test]
+    fn provider_meta_roundtrips_local_proxy_request_overrides() {
+        let meta = ProviderMeta {
+            local_proxy_request_overrides: Some(LocalProxyRequestOverrides {
+                body: Some(json!({ "temperature": 0.2 })),
+            }),
+            ..ProviderMeta::default()
+        };
+
+        let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
+        assert_eq!(
+            value["localProxyRequestOverrides"]["body"]["temperature"],
+            0.2
+        );
+
+        let decoded: ProviderMeta =
+            serde_json::from_value(value).expect("deserialize ProviderMeta");
+        let overrides = decoded.local_proxy_request_overrides.unwrap();
+        assert_eq!(overrides.body.unwrap()["temperature"], 0.2);
+    }
+
+    #[test]
+    fn provider_meta_omits_local_proxy_request_overrides_when_none() {
+        let meta = ProviderMeta::default();
+        let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
+        assert!(value.get("localProxyRequestOverrides").is_none());
+    }
+
+    #[test]
+    fn provider_meta_ignores_unused_headers_key_from_upstream_shape() {
+        // 上游 localProxyRequestOverrides 带 headers；我们只吃 body，headers 被安全忽略。
+        let value = json!({
+            "localProxyRequestOverrides": {
+                "headers": { "X-Test": "yes" },
+                "body": { "temperature": 0.3 }
+            }
+        });
+        let decoded: ProviderMeta =
+            serde_json::from_value(value).expect("deserialize ProviderMeta with upstream shape");
+        let overrides = decoded.local_proxy_request_overrides.unwrap();
+        assert_eq!(overrides.body.unwrap()["temperature"], 0.3);
     }
 
     #[test]

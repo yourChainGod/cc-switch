@@ -98,21 +98,30 @@ fn check_system_env(keywords: &[&str]) -> Result<Vec<EnvConflict>, String> {
     Ok(conflicts)
 }
 
-/// Check shell configuration files for environment variable exports (Unix only)
+/// The fixed set of shell configuration files cc-switch is allowed to scan and
+/// modify. Any file-type env conflict must point at one of these; this is the
+/// single source of truth used both here and when validating IPC-supplied
+/// conflicts in `env_manager`, so the frontend can never make us write to an
+/// arbitrary path.
+#[cfg(not(target_os = "windows"))]
+pub fn allowed_shell_config_files() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    vec![
+        format!("{home}/.bashrc"),
+        format!("{home}/.bash_profile"),
+        format!("{home}/.zshrc"),
+        format!("{home}/.zprofile"),
+        format!("{home}/.profile"),
+        "/etc/profile".to_string(),
+        "/etc/bashrc".to_string(),
+    ]
+}
+
 #[cfg(not(target_os = "windows"))]
 fn check_shell_configs(keywords: &[&str]) -> Result<Vec<EnvConflict>, String> {
     let mut conflicts = Vec::new();
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let config_files = vec![
-        format!("{}/.bashrc", home),
-        format!("{}/.bash_profile", home),
-        format!("{}/.zshrc", home),
-        format!("{}/.zprofile", home),
-        format!("{}/.profile", home),
-        "/etc/profile".to_string(),
-        "/etc/bashrc".to_string(),
-    ];
+    let config_files = allowed_shell_config_files();
 
     for file_path in config_files {
         if let Ok(content) = fs::read_to_string(&file_path) {

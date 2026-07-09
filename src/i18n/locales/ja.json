@@ -350,6 +350,15 @@
         "mediaHeuristic": "ヒューリスティックなテキスト専用モデル判定",
         "mediaHeuristicDescription": "送信前に内蔵モデル名リストに基づいて画像を予測的に削除します。オフにすると「宣言済みテキスト専用」と「上流エラー時のフォールバック」のみが残り、内蔵リストがマルチモーダルモデルをテキスト専用と誤判定して画像を静かに削除するのを防ぎます"
       },
+      "codexContinue": {
+        "title": "Codex Continue",
+        "description": "Codex ネイティブ Responses の推論継続",
+        "enabled": "Codex Continue を有効化",
+        "enabledDescription": "Codex ネイティブ Responses のストリーミングリクエストにのみ適用されます。デフォルトは無効です。",
+        "step": "切断ステップ",
+        "maxContinuations": "最大継続回数",
+        "marker": "継続プロンプト"
+      },
       "optimizer": {
         "title": "Bedrock リクエストオプティマイザー",
         "description": "リクエスト送信前に Thinking と Cache の設定を自動最適化（Bedrock プロバイダーのみ有効）",

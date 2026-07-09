@@ -350,6 +350,15 @@
         "mediaHeuristic": "啟發式純文字模型辨識",
         "mediaHeuristicDescription": "傳送前依內建模型名稱清單預測性地移除圖片。關閉後僅保留「已宣告純文字」與「上游錯誤兜底」兩條事實驅動路徑，避免內建清單將多模態模型誤判為純文字而靜默丟失圖片"
       },
+      "codexContinue": {
+        "title": "Codex Continue",
+        "description": "Codex 原生 Responses 推理續寫",
+        "enabled": "啟用 Codex Continue",
+        "enabledDescription": "僅對 Codex 原生 Responses 串流請求生效，預設關閉。",
+        "step": "截斷步長",
+        "maxContinuations": "最大續寫次數",
+        "marker": "續寫提示"
+      },
       "optimizer": {
         "title": "Bedrock 請求最佳化工具",
         "description": "在請求發送前自動最佳化 Thinking 和 Cache 設定（僅 Bedrock 供應商生效）",

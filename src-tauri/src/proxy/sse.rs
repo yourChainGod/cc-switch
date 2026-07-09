@@ -4,6 +4,14 @@ pub(crate) fn strip_sse_field<'a>(line: &'a str, field: &str) -> Option<&'a str>
         .or_else(|| line.strip_prefix(&format!("{field}:")))
 }
 
+/// Hard cap on how large a single, still-undelimited SSE block may grow before
+/// we force-flush it. A well-behaved SSE event is a few KB at most; a stream
+/// that trickles bytes without ever emitting a `\n\n` / `\r\n\r\n` delimiter
+/// (misbehaving or malicious upstream) would otherwise grow the shared buffer
+/// without bound until the process OOMs. 8 MiB is far above any legitimate
+/// event while bounding worst-case memory per stream.
+const MAX_SSE_BLOCK_BYTES: usize = 8 * 1024 * 1024;
+
 #[inline]
 pub(crate) fn take_sse_block(buffer: &mut String) -> Option<String> {
     let mut best: Option<(usize, usize)> = None;
@@ -16,7 +24,21 @@ pub(crate) fn take_sse_block(buffer: &mut String) -> Option<String> {
         }
     }
 
-    let (pos, len) = best?;
+    let (pos, len) = match best {
+        Some(found) => found,
+        None => {
+            // No delimiter yet. If the buffer has grown past the cap, flush it
+            // as a single (malformed) block so callers can drop it and reclaim
+            // memory instead of accumulating without bound.
+            if buffer.len() >= MAX_SSE_BLOCK_BYTES {
+                log::warn!(
+                    "[SSE] 单个未分隔块超过 {MAX_SSE_BLOCK_BYTES} 字节，强制丢弃以防内存耗尽"
+                );
+                return Some(std::mem::take(buffer));
+            }
+            return None;
+        }
+    };
     let block = buffer[..pos].to_string();
     buffer.drain(..pos + len);
     Some(block)

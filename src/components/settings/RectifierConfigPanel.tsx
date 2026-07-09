@@ -39,26 +39,41 @@ export function RectifierConfigPanel() {
   }, []);
 
   const handleChange = async (updates: Partial<RectifierConfig>) => {
+    // 以最新状态为基准合并本次改动（不依赖闭包快照，避免连续切换互相覆盖）
     const newConfig = { ...config, ...updates };
-    setConfig(newConfig);
+    setConfig((prev) => ({ ...prev, ...updates }));
     try {
       await settingsApi.setRectifierConfig(newConfig);
     } catch (e) {
       console.error("Failed to save rectifier config:", e);
       toast.error(String(e));
-      setConfig(config);
+      // 回滚仅撤销本次触及的字段，保留其它已成功的并发切换
+      setConfig((prev) => {
+        const reverted = { ...prev };
+        for (const key of Object.keys(updates) as (keyof RectifierConfig)[]) {
+          reverted[key] = config[key];
+        }
+        return reverted;
+      });
     }
   };
 
   const handleOptimizerChange = async (updates: Partial<OptimizerConfig>) => {
     const newConfig = { ...optimizerConfig, ...updates };
-    setOptimizerConfig(newConfig);
+    setOptimizerConfig((prev) => ({ ...prev, ...updates }));
     try {
       await settingsApi.setOptimizerConfig(newConfig);
     } catch (e) {
       console.error("Failed to save optimizer config:", e);
       toast.error(String(e));
-      setOptimizerConfig(optimizerConfig);
+      setOptimizerConfig((prev) => {
+        const reverted = { ...prev } as unknown as Record<string, unknown>;
+        const snapshot = optimizerConfig as unknown as Record<string, unknown>;
+        for (const key of Object.keys(updates)) {
+          reverted[key] = snapshot[key];
+        }
+        return reverted as unknown as OptimizerConfig;
+      });
     }
   };
 

@@ -53,23 +53,31 @@ export function ModelMappingPanel({ client }: { client: ModelRoutingClient }) {
     codex: [],
     gemini: [],
   });
+  const [dirty, setDirty] = useState(false);
 
+  // 同步服务端配置到草稿。dirty 时跳过：后台 refetch（窗口聚焦 / 定时刷新 /
+  // 其他面板写同一 config 触发失效）不应覆盖用户尚未保存的规则增删改，否则草稿
+  // 被静默重置、随后 Save 会持久化陈旧的服务端状态而非用户改动。
   useEffect(() => {
-    if (config) {
+    if (config && !dirty) {
       setDraft({
         claude: config.claude ?? [],
         codex: config.codex ?? [],
         gemini: config.gemini ?? [],
       });
     }
-  }, [config]);
+  }, [config, dirty]);
 
   const handleSave = () => {
-    updateConfig.mutate(draft);
+    updateConfig.mutate(draft, {
+      onSuccess: () => setDirty(false),
+    });
   };
 
-  const setRules = (client: ModelRoutingClient, rules: ModelRoutingRule[]) =>
+  const setRules = (client: ModelRoutingClient, rules: ModelRoutingRule[]) => {
+    setDirty(true);
     setDraft((prev) => ({ ...prev, [client]: rules }));
+  };
 
   if (isLoading) {
     return (

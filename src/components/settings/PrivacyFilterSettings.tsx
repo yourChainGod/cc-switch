@@ -47,13 +47,20 @@ export function PrivacyFilterSettings() {
 
   const handleChange = async (updates: Partial<PrivacyFilterConfig>) => {
     const newConfig = { ...config, ...updates };
-    setConfig(newConfig);
+    setConfig((prev) => ({ ...prev, ...updates }));
     try {
       await privacyFilterApi.setConfig(newConfig);
     } catch (e) {
       console.error("Failed to save privacy filter config:", e);
       toast.error(String(e));
-      setConfig(config);
+      // 回滚仅撤销本次触及的字段，保留其它已成功的并发切换
+      setConfig((prev) => {
+        const reverted = { ...prev };
+        for (const key of Object.keys(updates) as (keyof PrivacyFilterConfig)[]) {
+          reverted[key] = config[key];
+        }
+        return reverted;
+      });
     }
   };
 
