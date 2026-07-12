@@ -174,7 +174,7 @@
     "title": "Key 池",
     "count": "{{count}} 个",
     "description": "优先级第一的可用 Key 会写入直连配置；路由请求也使用同一个池自动故障转移。",
-    "summary": "Key {{available}}/{{total}}",
+    "summary": "Key {{total}}/{{available}}/{{disabled}}",
     "summaryWithIssues": "Key {{total}} / {{issues}} 异常",
     "summaryTooltip": "{{available}}/{{total}} 个 Key 可用。不稳定：{{degraded}}，冷却中：{{cooldown}}，已停用：{{disabled}}。最高优先级：{{priority}}。",
     "resetCooldown": "重置冷却",

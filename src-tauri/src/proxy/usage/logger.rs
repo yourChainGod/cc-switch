@@ -114,10 +114,45 @@ impl<'a> UsageLogger<'a> {
         )
         .map_err(|e| AppError::Database(format!("记录请求日志失败: {e}")))?;
 
+        drop(conn);
+
+        // Keep this side effect after the log write: the request log remains the
+        // source of truth, while 403-triggered key disablement is a best-effort
+        // safety action that must not make usage logging fail.
+        self.disable_matching_keys_after_forbidden(log);
+
         // 通知前端使用统计有更新（200ms 防抖合并，不阻塞写入路径）
         crate::usage_events::notify_log_recorded();
 
         Ok(())
+    }
+
+    fn disable_matching_keys_after_forbidden(&self, log: &RequestLog) {
+        if log.status_code != 403 {
+            return;
+        }
+
+        let Some(key_id) = log.provider_key_id.as_deref() else {
+            return;
+        };
+
+        // `provider_key_id` points to the concrete key used for this request.
+        // The DAO intentionally matches by key value across all app/provider
+        // rows so duplicated keys in Claude, Codex, Gemini, or parallel
+        // providers are disabled together.
+        match self.db.disable_provider_keys_matching_key_id(key_id) {
+            Ok(updated) if updated > 0 => {
+                log::warn!(
+                    "[USG-004] 403 request disabled matching provider keys: key_id={key_id}, updated={updated}"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!(
+                    "[USG-004] failed to disable matching provider keys after 403: key_id={key_id}, error={e}"
+                );
+            }
+        }
     }
 
     /// 记录失败的请求
@@ -373,6 +408,39 @@ impl<'a> UsageLogger<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{Provider, ProviderKeyInput, ProviderKeyStatus};
+    use serde_json::json;
+
+    fn save_provider_fixture(db: &Database, app_type: &str, provider_id: &str) {
+        let provider = Provider {
+            id: provider_id.to_string(),
+            name: provider_id.to_string(),
+            settings_config: json!({}),
+            website_url: None,
+            category: Some("third_party".to_string()),
+            created_at: Some(1),
+            sort_index: Some(1),
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        };
+        db.save_provider(app_type, &provider)
+            .expect("save provider fixture");
+    }
+
+    fn key_input(name: &str, key_value: &str) -> ProviderKeyInput {
+        ProviderKeyInput {
+            name: name.to_string(),
+            key_value: key_value.to_string(),
+            auth_field: Some("ANTHROPIC_API_KEY".to_string()),
+            enabled: true,
+            priority: 0,
+            weight: 1,
+            usage_script: None,
+        }
+    }
 
     #[test]
     fn test_log_request() -> Result<(), AppError> {
@@ -470,6 +538,72 @@ mod tests {
             .unwrap();
         assert_eq!(status, 500);
         assert_eq!(error, Some("Internal Server Error".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn log_403_disables_matching_provider_keys_across_providers() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        save_provider_fixture(&db, "claude", "provider-a");
+        save_provider_fixture(&db, "claude", "provider-b");
+        save_provider_fixture(&db, "codex", "provider-c");
+        save_provider_fixture(&db, "gemini", "provider-d");
+        save_provider_fixture(&db, "codex", "provider-e");
+
+        let failed = db.add_provider_key("claude", "provider-a", &key_input("a", "sk-shared"))?;
+        let same_value =
+            db.add_provider_key("claude", "provider-b", &key_input("b", "sk-shared"))?;
+        let same_value_codex =
+            db.add_provider_key("codex", "provider-c", &key_input("c", "sk-shared"))?;
+        let same_value_gemini =
+            db.add_provider_key("gemini", "provider-d", &key_input("d", "sk-shared"))?;
+        let different_value =
+            db.add_provider_key("codex", "provider-e", &key_input("e", "sk-other"))?;
+
+        let logger = UsageLogger::new(&db);
+        logger.log_error_with_context(
+            "req-forbidden".to_string(),
+            "provider-a".to_string(),
+            Some(failed.id.clone()),
+            "claude".to_string(),
+            "claude-sonnet".to_string(),
+            403,
+            "Forbidden".to_string(),
+            42,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )?;
+
+        let failed_after = db
+            .get_provider_key("claude", "provider-a", &failed.id)?
+            .expect("failed key exists");
+        let same_value_after = db
+            .get_provider_key("claude", "provider-b", &same_value.id)?
+            .expect("matching key exists");
+        let same_value_codex_after = db
+            .get_provider_key("codex", "provider-c", &same_value_codex.id)?
+            .expect("matching codex key exists");
+        let same_value_gemini_after = db
+            .get_provider_key("gemini", "provider-d", &same_value_gemini.id)?
+            .expect("matching gemini key exists");
+        let different_value_after = db
+            .get_provider_key("codex", "provider-e", &different_value.id)?
+            .expect("different key exists");
+
+        assert!(!failed_after.enabled);
+        assert_eq!(failed_after.status, ProviderKeyStatus::Disabled);
+        assert!(!same_value_after.enabled);
+        assert_eq!(same_value_after.status, ProviderKeyStatus::Disabled);
+        assert!(!same_value_codex_after.enabled);
+        assert_eq!(same_value_codex_after.status, ProviderKeyStatus::Disabled);
+        assert!(!same_value_gemini_after.enabled);
+        assert_eq!(same_value_gemini_after.status, ProviderKeyStatus::Disabled);
+        assert!(different_value_after.enabled);
+        assert_eq!(different_value_after.status, ProviderKeyStatus::Active);
+
         Ok(())
     }
 }
